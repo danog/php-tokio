@@ -1,6 +1,6 @@
 // Borrowed from https://github.com/jeremyBanks/you-can
 
-use ext_php_rs::binary_slice::{BinarySlice, PackSlice};
+use nicelocal_ext_php_rs::binary_slice::{BinarySlice, PackSlice};
 
 
 #[inline(always)]

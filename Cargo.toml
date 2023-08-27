@@ -8,7 +8,7 @@ authors = ["Daniil Gentili <daniil@daniil.it>"]
 edition = "2021"
 
 [dependencies]
-ext-php-rs = { git = "https://github.com/nicelocal/ext-php-rs", features = ["anyhow"], tag = "v0.10.2" }
+nicelocal-ext-php-rs = "0.10.3"
 tokio = { version = "1", features = ["full"] }
 tokio-pipe = "*"
 lazy_static = "1.4.0"
