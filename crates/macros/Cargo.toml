@@ -1,0 +1,18 @@
+[package]
+name = "php-tokio-derive"
+description = "Derive macros for php-tokio."
+repository = "https://github.com/danog/php-tokio"
+homepage = "https://github.com/danog/php-tokio"
+license = "AGPLv3"
+version = "0.1.0"
+authors = ["Daniil Gentili <daniil@daniil.it>"]
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "^2", features = ["full", "extra-traits", "printing"] }
+quote = "^1"
+proc-macro2 = "^1"
+anyhow = "^1.0"

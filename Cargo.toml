@@ -1,0 +1,22 @@
+[package]
+name = "php-tokio"
+repository = "https://github.com/danog/php-tokio"
+homepage = "https://github.com/danog/php-tokio"
+license = "AGPLv3"
+version = "0.1.0"
+authors = ["Daniil Gentili <daniil@daniil.it>"]
+edition = "2021"
+
+[dependencies]
+ext-php-rs = { git = "https://github.com/nicelocal/ext-php-rs", features = ["anyhow"] }
+tokio = { version = "1", features = ["full"] }
+tokio-pipe = "*"
+lazy_static = "1.4.0"
+libc = "*"
+php-tokio-derive = { version = "=0.1.0", path = "./crates/macros" }
+
+
+[workspace]
+members = [
+    "crates/macros",
+]
