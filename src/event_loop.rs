@@ -61,6 +61,21 @@ impl EventLoop {
     }
     
     pub fn suspend_on<T: Send + 'static, F: Future<Output = T> + Send + 'static>(future: F) -> T {
+        // What's going on here? Unsafe borrows???
+        // NO: this is actually 100% safe, and here's why.
+        //
+        // Rust thinks we're Sending the Future to another thread (tokio's event loop), 
+        // where it may be used even after its lifetime expires in the main (PHP) thread.
+        //
+        // In reality, the Future is only used by Tokio until the result is ready.
+        //
+        // Rust does not understand that when we suspend the current fiber in suspend_on, 
+        // we basically keep alive the the entire stack, 
+        // including the Rust stack and the Future on it, until the result of the future is ready.
+        //
+        // Once the result of the Future is ready, tokio doesn't need it anymore, 
+        // the suspend_on function is resumed, and we safely drop the Future upon exiting.
+        //
         let (future, get_current_suspension) = EVENTLOOP.with_borrow_mut(move |c| {
             let c = c.as_mut().unwrap();
             let idx = c.fibers.len() as u64;
@@ -79,7 +94,10 @@ impl EventLoop {
             })
         });
 
+        // We suspend the fiber here, the Rust stack is kept alive until the result is ready.
         call_user_func!(get_current_suspension).unwrap().try_call_method("suspend", vec![]).unwrap();
+        
+        // We've resumed, the `future` is already resolved and is not used by the tokio thread, it's safe to drop it.
 
         return RUNTIME.block_on(future).unwrap();
     }
