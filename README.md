@@ -63,6 +63,6 @@ See the [source code](https://github.com/danog/php-tokio/tree/master/examples/re
 
 ## Built with php-tokio
 
-Here's a list of async PHP extensions built with php-tokio (add yours by editing this file!):
+Here's a list of async PHP extensions built with php-tokio ([add yours by editing this file!](https://github.com/danog/php-tokio/edit/master/README.md)):
 
 - [nicelocal/mongo-php-async-driver](https://github.com/Nicelocal/mongo-php-async-driver) - An async MongoDB PHP extension
