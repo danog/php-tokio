@@ -22,17 +22,19 @@ require 'vendor/autoload.php';
 
 Client::init();
 
-$test = function (string $url): void {
+function test(int $delay): void {
+    $url = "https://httpbin.org/delay/$delay";
     $t = time();
-    echo "Making async parallel reqwest to $url (time $t)...".PHP_EOL;
+    echo "Making async reqwest to $url that will return after $delay seconds...".PHP_EOL;
+    Client::get($url);
     $t = time() - $t;
     echo "Got response from $url after ~".$t." seconds!".PHP_EOL;
 };
 
 $futures = [];
-$futures []= async($test(...), "https://httpbin.org/delay/5");
-$futures []= async($test(...), "https://httpbin.org/delay/5");
-$futures []= async($test(...), "https://httpbin.org/delay/5");
+$futures []= async(test(...), 5);
+$futures []= async(test(...), 5);
+$futures []= async(test(...), 5);
 
 await($futures);
 ```
@@ -49,12 +51,12 @@ cd examples/reqwest && \
 Result:
 
 ```
-Making async parallel reqwest to https://httpbin.org/delay/5 (time 1693160463)...
-Making async parallel reqwest to https://httpbin.org/delay/5 (time 1693160463)...
-Making async parallel reqwest to https://httpbin.org/delay/5 (time 1693160463)...
-Got response from https://httpbin.org/delay/5 after ~6 seconds!
-Got response from https://httpbin.org/delay/5 after ~6 seconds!
-Got response from https://httpbin.org/delay/5 after ~6 seconds!
+Making async reqwest to https://httpbin.org/delay/5 that will return after 5 seconds...
+Making async reqwest to https://httpbin.org/delay/5 that will return after 5 seconds...
+Making async reqwest to https://httpbin.org/delay/5 that will return after 5 seconds...
+Got response from https://httpbin.org/delay/5 after ~5 seconds!
+Got response from https://httpbin.org/delay/5 after ~5 seconds!
+Got response from https://httpbin.org/delay/5 after ~5 seconds!
 ```
 
 See the [source code](https://github.com/danog/php-tokio/tree/master/examples/reqwest) of the example for more info on how it works!
