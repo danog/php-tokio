@@ -3,6 +3,7 @@ name = "php-tokio"
 repository = "https://github.com/danog/php-tokio"
 homepage = "https://github.com/danog/php-tokio"
 license = "AGPL-3.0-or-later"
+description = "Use any async Rust library from PHP!"
 version = "0.1.0"
 authors = ["Daniil Gentili <daniil@daniil.it>"]
 edition = "2021"
