@@ -1,5 +1,11 @@
 {
     "require": {
-        "revolt/event-loop": "^1.0"
+        "revolt/event-loop": "^1.0",
+        "amphp/amp": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Reqwest\\": "lib"
+        }
     }
 }

@@ -2,17 +2,19 @@
 
 namespace Reqwest;
 
+use Revolt\EventLoop;
+
 final class Client {
     private static ?string $id = null;
     
-    public static function register(): void {
+    public static function init(): void {
         if (self::$id !== null) {
             return;
         }
 
-        $f = fopen("php://fd/".\reqwest_async_init(), 'r+');
+        $f = fopen("php://fd/".\Client::init(), 'r+');
         stream_set_blocking($f, false);
-        self::$id = EventLoop::onReadable($f, fn () => \reqwest_async_wakeup());
+        self::$id = EventLoop::onReadable($f, fn () => \Client::wakeup());
     }
 
     public static function reference(): void{
@@ -23,6 +25,6 @@ final class Client {
     }
 
     public static function __callStatic(string $name, array $args): mixed {
-        return \Client::$name($args);
+        return \Client::$name(...$args);
     }
 }

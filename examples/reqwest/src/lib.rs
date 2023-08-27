@@ -13,11 +13,12 @@ impl Client {
     pub fn wakeup() -> PhpResult<()> {
         EventLoop::wakeup()
     }
-    pub async fn get(url: &str) -> String {
-        reqwest::get("https://www.rust-lang.org")
+    pub async fn get(url: &str) -> anyhow::Result<String> {
+        Ok(reqwest::get(url)
             .await?
             .text()
             .await?
+        )
     }
 }
 

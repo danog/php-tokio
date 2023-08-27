@@ -1,14 +1,6 @@
-# php-tokio - Use any async Rust library from PHP!
+# php-tokio example
 
-Created by Daniil Gentili ([@danog](https://github.com/danog)).  
-
-This library allows you to use any async rust library from PHP, asynchronously.  
-
-It's fully integrated with [revolt](https://revolt.run): this allows full compatibility with [amphp](https://amphp.org), [PSL](https://github.com/azjezz/psl) and reactphp.  
-
-## Example
-
-Here's an example, using the async Rust [reqwest](https://docs.rs/reqwest/latest/reqwest/) library to make asynchronous HTTP requests from PHP:
+Here's a usage example of [php-tokio](https://github.com/danog/php-tokio/), using the async Rust [reqwest](https://docs.rs/reqwest/latest/reqwest/) library to make asynchronous HTTP requests from PHP:
 
 ```php
 <?php
@@ -58,9 +50,3 @@ Got response from https://httpbin.org/delay/5 after ~6 seconds!
 ```
 
 See the [source code](https://github.com/danog/php-tokio/tree/master/examples/reqwest) of the example for more info on how it works!
-
-## Built with php-tokio
-
-Here's a list of async PHP extensions built with php-tokio (add yours by editing this file!):
-
-- [nicelocal/mongo-php-async-driver](https://github.com/Nicelocal/mongo-php-async-driver) - An async MongoDB PHP extension
