@@ -1,4 +1,4 @@
-# php-tokio - Use any async rust library from PHP!
+# php-tokio - Use any async Rust library from PHP!
 
 Created by Daniil Gentili ([@danog](https://github.com/danog)).  
 
