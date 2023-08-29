@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 use Reqwest\Client;
 
@@ -9,7 +9,8 @@ require 'vendor/autoload.php';
 
 Client::init();
 
-function test(int $delay): void {
+function test(int $delay): void
+{
     $url = "https://httpbin.org/delay/$delay";
     $t = time();
     echo "Making async reqwest to $url that will return after $delay seconds...".PHP_EOL;

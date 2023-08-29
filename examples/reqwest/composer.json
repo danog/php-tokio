@@ -3,9 +3,15 @@
         "revolt/event-loop": "^1.0",
         "amphp/amp": "^3.0"
     },
+    "require-dev": {
+        "amphp/php-cs-fixer-config": "v2.x-dev"
+    },
     "autoload": {
         "psr-4": {
             "Reqwest\\": "lib"
         }
+    },
+    "scripts": {
+        "cs-fix": "PHP_CS_FIXER_IGNORE_ENV=1 php -d pcre.jit=0 vendor/bin/php-cs-fixer fix -v --diff"
     }
 }

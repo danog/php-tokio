@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Reqwest;
 
@@ -14,9 +14,9 @@ final class Client
             return;
         }
 
-        $f = fopen("php://fd/" . \Client::init(), "r+");
-        stream_set_blocking($f, false);
-        self::$id = EventLoop::onReadable($f, fn() => \Client::wakeup());
+        $f = \fopen("php://fd/".\Client::init(), 'r+');
+        \stream_set_blocking($f, false);
+        self::$id = EventLoop::onReadable($f, fn () => \Client::wakeup());
     }
 
     public static function reference(): void
