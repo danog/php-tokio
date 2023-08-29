@@ -1,18 +1,16 @@
 use crate::borrow_unchecked::borrow_unchecked;
 use lazy_static::lazy_static;
-use nicelocal_ext_php_rs::boxed::ZBox;
-use nicelocal_ext_php_rs::call_user_func;
-use nicelocal_ext_php_rs::prelude::*;
-use nicelocal_ext_php_rs::types::ZendHashTable;
-use nicelocal_ext_php_rs::zend::Function;
-use std::cell::RefCell;
-use std::fs::File;
-use std::future::Future;
-use std::io::Read;
-use std::io::{self, Write};
-use std::os::fd::AsRawFd;
-use std::os::fd::{FromRawFd, RawFd};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use nicelocal_ext_php_rs::{
+    boxed::ZBox, call_user_func, prelude::*, types::ZendHashTable, zend::Function,
+};
+use std::{
+    cell::RefCell,
+    fs::File,
+    future::Future,
+    io::{self, Read, Write},
+    os::fd::{AsRawFd, FromRawFd, RawFd},
+    sync::mpsc::{channel, Receiver, Sender},
+};
 use tokio::runtime::Runtime;
 
 lazy_static! {
