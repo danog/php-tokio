@@ -5,20 +5,19 @@
 //
 // This is needed because of https://github.com/danog/php-tokio/blob/master/src/event_loop.rs#L72
 //
-// Rust thinks we're Sending the Future to another thread (tokio's event loop), 
+// Rust thinks we're Sending the Future to another thread (tokio's event loop),
 // where it may be used even after its lifetime expires in the main (PHP) thread.
 //
 // In reality, the Future is only used by Tokio until the result is ready.
 //
-// Rust does not understand that when we suspend the current fiber in suspend_on, 
-// we basically keep alive the the entire stack, 
+// Rust does not understand that when we suspend the current fiber in suspend_on,
+// we basically keep alive the the entire stack,
 // including the Rust stack and the Future on it, until the result of the future is ready.
 //
-// Once the result of the Future is ready, tokio doesn't need it anymore, 
+// Once the result of the Future is ready, tokio doesn't need it anymore,
 // the suspend_on function is resumed, and we safely drop the Future upon exiting.
 
 use nicelocal_ext_php_rs::binary_slice::{BinarySlice, PackSlice};
-
 
 #[inline(always)]
 pub unsafe fn borrow_unchecked<
