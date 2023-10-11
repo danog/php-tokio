@@ -4,7 +4,7 @@ description = "Derive macros for php-tokio."
 repository = "https://github.com/danog/php-tokio"
 homepage = "https://github.com/danog/php-tokio"
 license = "Apache-2.0"
-version = "0.2"
+version = "0.2.0"
 authors = ["Daniil Gentili <daniil@daniil.it>"]
 edition = "2021"
 
