@@ -1,6 +1,6 @@
 use crate::borrow_unchecked::borrow_unchecked;
 use lazy_static::lazy_static;
-use nicelocal_ext_php_rs::{
+use ext_php_rs::{
     boxed::ZBox, call_user_func, prelude::*, types::ZendHashTable, zend::Function,
 };
 use std::{
@@ -134,7 +134,7 @@ impl EventLoop {
             sys_pipe().map_err(|err| format!("Could not create pipe: {}", err))?;
 
         if !call_user_func!(
-            Function::from_function("class_exists"),
+            Function::try_from_function("class_exists").unwrap(),
             "\\Revolt\\EventLoop"
         )?
         .bool()
@@ -143,7 +143,7 @@ impl EventLoop {
             return Err(format!("\\Revolt\\EventLoop does not exist!").into());
         }
         if !call_user_func!(
-            Function::from_function("interface_exists"),
+            Function::try_from_function("interface_exists").unwrap(),
             "\\Revolt\\EventLoop\\Suspension"
         )?
         .bool()

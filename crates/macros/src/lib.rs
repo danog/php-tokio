@@ -42,7 +42,7 @@ fn parser(input: ItemImpl) -> Result<TokenStream> {
         .collect::<Result<Vec<_>>>()?;
 
     let output = quote! {
-        #[::nicelocal_ext_php_rs::php_impl]
+        #[::ext_php_rs::php_impl]
         impl #self_ty {
             #(#tokens)*
         }

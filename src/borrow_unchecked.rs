@@ -17,7 +17,7 @@
 // Once the result of the Future is ready, tokio doesn't need it anymore,
 // the suspend_on function is resumed, and we safely drop the Future upon exiting.
 
-use nicelocal_ext_php_rs::binary_slice::{BinarySlice, PackSlice};
+use ext_php_rs::binary_slice::{BinarySlice, PackSlice};
 
 #[inline(always)]
 pub unsafe fn borrow_unchecked<

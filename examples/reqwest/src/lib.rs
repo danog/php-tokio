@@ -1,4 +1,4 @@
-use nicelocal_ext_php_rs::prelude::*;
+use ext_php_rs::prelude::*;
 use php_tokio::{php_async_impl, EventLoop};
 
 #[php_class]

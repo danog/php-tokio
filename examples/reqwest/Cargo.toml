@@ -10,6 +10,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 php-tokio = "^0.1.2"
-nicelocal-ext-php-rs = { version = "^0.10.4", features = ["anyhow"] }
+ext-php-rs = { version = "^0.10.2", features = ["anyhow"] }
 reqwest = "^0.11"
 anyhow = "^1.0"
