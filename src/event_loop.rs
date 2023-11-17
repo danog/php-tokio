@@ -1,8 +1,6 @@
 use crate::borrow_unchecked::borrow_unchecked;
+use ext_php_rs::{boxed::ZBox, call_user_func, prelude::*, types::ZendHashTable, zend::Function};
 use lazy_static::lazy_static;
-use ext_php_rs::{
-    boxed::ZBox, call_user_func, prelude::*, types::ZendHashTable, zend::Function,
-};
 use std::{
     cell::RefCell,
     fs::File,
@@ -27,6 +25,50 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
     let ret = unsafe { libc::pipe2(pipefd.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if ret == -1 {
         return Err(io::Error::last_os_error());
+    }
+    Ok((pipefd[0], pipefd[1]))
+}
+
+#[cfg(any(target_os = "macos"))]
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    use libc::{F_SETFD, FD_CLOEXEC, F_GETFD};
+    use libc::fcntl;
+
+    let flags = unsafe { fcntl(fd, F_GETFD, 0) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let ret = unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos"))]
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    use libc::{fcntl, F_SETFL, O_NONBLOCK};
+
+    let ret = unsafe { fcntl(fd, F_SETFL, O_NONBLOCK) };
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos"))]
+fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
+    let mut pipefd = [0; 2];
+    let ret = unsafe { libc::pipe(pipefd.as_mut_ptr()) };
+
+    if ret == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    for fd in &pipefd {
+        set_cloexec(*fd)?;
+        set_nonblocking(*fd)?;
     }
     Ok((pipefd[0], pipefd[1]))
 }
