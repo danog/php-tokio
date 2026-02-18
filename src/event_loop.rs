@@ -90,8 +90,8 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
 pub struct EventLoop {
     fibers: ZBox<ZendHashTable>,
 
-    sender: Sender<u64>,
-    receiver: Receiver<u64>,
+    sender: Sender<i64>,
+    receiver: Receiver<i64>,
 
     notify_sender: File,
     notify_receiver: File,
@@ -131,7 +131,7 @@ impl EventLoop {
         //
         let (future, get_current_suspension) = EVENTLOOP.with_borrow_mut(move |c| {
             let c = c.as_mut().unwrap();
-            let idx = c.fibers.len() as u64;
+            let idx = c.fibers.len() as i64;
             c.fibers
                 .insert_at_index(idx, call_user_func!(c.get_current_suspension).unwrap())
                 .unwrap();
