@@ -174,7 +174,7 @@ impl EventLoop {
         EVENTLOOP.with_borrow_mut(|c| {
             let c = c.as_mut().unwrap();
 
-            c.notify_receiver.read_exact(&mut c.dummy).unwrap();
+            while let Ok(1) = c.notify_receiver.read(&mut c.dummy) {}
 
             for mut suspesion in c.receiver.try_iter() {
                 suspesion.0
