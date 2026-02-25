@@ -9,7 +9,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-php-tokio = "^0.1.4"
-ext-php-rs = { version = "^0.10.2", features = ["anyhow"] }
+php-tokio = { path = "../.." }
+ext-php-rs = { version = "^0.15.6", features = ["anyhow"] }
 reqwest = "^0.11"
 anyhow = "^1.0"
