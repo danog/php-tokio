@@ -23,6 +23,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, RawFd},
     sync::mpsc::{channel, Receiver, Sender},
 };
+use ext_php_rs::types::Zval;
 use tokio::runtime::Runtime;
 
 lazy_static! {
@@ -88,11 +89,8 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
 }
 
 pub struct EventLoop {
-    fiber_idx: i64,
-    fibers: ZBox<ZendHashTable>,
-
-    sender: Sender<i64>,
-    receiver: Receiver<i64>,
+    sender: Sender<Suspension>,
+    receiver: Receiver<Suspension>,
 
     notify_sender: File,
     notify_receiver: File,
@@ -101,6 +99,19 @@ pub struct EventLoop {
 
     dummy: [u8; 1],
 }
+
+/// # Safety
+///
+/// `Suspension` contains a PHP `Zval`, but it is never accessed from Tokio threads.
+/// The value is only moved across threads and sent back through a channel.
+/// All interaction with the inner `Zval` (e.g. calling `resume()`) happens
+/// exclusively on the original PHP thread in `EventLoop::wakeup()`.
+///
+/// Therefore, no PHP memory is accessed off-thread, making `Send` and `Sync` sound
+/// under this invariant.
+struct Suspension(Zval);
+unsafe impl Send for Suspension {}
+unsafe impl Sync for Suspension {}
 
 impl EventLoop {
     pub fn init() -> PhpResult<u64> {
@@ -132,11 +143,7 @@ impl EventLoop {
         //
         let (future, get_current_suspension) = EVENTLOOP.with_borrow_mut(move |c| {
             let c = c.as_mut().unwrap();
-            let idx = c.fiber_idx;
-            c.fiber_idx += 1;
-            c.fibers
-                .insert_at_index(idx, call_user_func!(c.get_current_suspension).unwrap())
-                .unwrap();
+            let suspension = Suspension(call_user_func!(c.get_current_suspension).unwrap());
 
             let sender = c.sender.clone();
             let mut notifier = c.notify_sender.try_clone().unwrap();
@@ -144,7 +151,7 @@ impl EventLoop {
             (
                 RUNTIME.spawn(async move {
                     let res = future.await;
-                    sender.send(idx).unwrap();
+                    sender.send(suspension).unwrap();
                     notifier.write_all(&[0]).unwrap();
                     res
                 }),
@@ -167,16 +174,13 @@ impl EventLoop {
         EVENTLOOP.with_borrow_mut(|c| {
             let c = c.as_mut().unwrap();
 
-            c.notify_receiver.read_exact(&mut c.dummy).unwrap();
+            while let Ok(1) = c.notify_receiver.read(&mut c.dummy) {}
 
-            for fiber_id in c.receiver.try_iter() {
-                if let Some(fiber) = c.fibers.get_index_mut(fiber_id) {
-                    fiber
-                        .object_mut()
-                        .unwrap()
-                        .try_call_method("resume", vec![])?;
-                    c.fibers.remove_index(fiber_id);
-                }
+            for mut suspesion in c.receiver.try_iter() {
+                suspesion.0
+                    .object_mut()
+                    .unwrap()
+                    .try_call_method("resume", vec![])?;
             }
             Ok(())
         })
@@ -211,10 +215,8 @@ impl EventLoop {
         }
 
         Ok(Self {
-            fibers: ZendHashTable::new(),
-            fiber_idx: 0,
-            sender: sender,
-            receiver: receiver,
+            sender,
+            receiver,
             notify_sender: unsafe { File::from_raw_fd(notify_sender) },
             notify_receiver: unsafe { File::from_raw_fd(notify_receiver) },
             dummy: [0; 1],
