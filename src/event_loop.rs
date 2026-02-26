@@ -1,11 +1,11 @@
 // Copyright 2023-2024 Daniil Gentili
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use crate::borrow_unchecked::borrow_unchecked;
-use ext_php_rs::{boxed::ZBox, call_user_func, prelude::*, types::ZendHashTable, zend::Function};
+use ext_php_rs::types::Zval;
+use ext_php_rs::{call_user_func, prelude::*, zend::Function};
 use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
@@ -23,7 +24,6 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, RawFd},
     sync::mpsc::{channel, Receiver, Sender},
 };
-use ext_php_rs::types::Zval;
 use tokio::runtime::Runtime;
 
 lazy_static! {
@@ -46,8 +46,8 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
 
 #[cfg(any(target_os = "macos"))]
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    use libc::{F_SETFD, FD_CLOEXEC, F_GETFD};
     use libc::fcntl;
+    use libc::{FD_CLOEXEC, F_GETFD, F_SETFD};
 
     let flags = unsafe { fcntl(fd, F_GETFD, 0) };
     if flags == -1 {
@@ -177,7 +177,8 @@ impl EventLoop {
             while let Ok(1) = c.notify_receiver.read(&mut c.dummy) {}
 
             for mut suspesion in c.receiver.try_iter() {
-                suspesion.0
+                suspesion
+                    .0
                     .object_mut()
                     .unwrap()
                     .try_call_method("resume", vec![])?;

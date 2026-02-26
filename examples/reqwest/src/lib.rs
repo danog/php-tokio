@@ -24,6 +24,7 @@ pub extern "C" fn request_shutdown(_type: i32, _module_number: i32) -> i32 {
 
 #[php_module]
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
-    module.request_shutdown_function(request_shutdown)
+    module
+        .request_shutdown_function(request_shutdown)
         .class::<Client>()
 }
