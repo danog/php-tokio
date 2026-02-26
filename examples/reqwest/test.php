@@ -7,6 +7,10 @@ use function Amp\Future\await;
 
 require 'vendor/autoload.php';
 
+if (!extension_loaded('example-reqwest')) {
+    die("The example-reqwest extension is not loaded. Please load it to run this example.".PHP_EOL);
+}
+
 Client::init();
 
 function test(int $delay): void
