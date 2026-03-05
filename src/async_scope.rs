@@ -42,8 +42,16 @@ impl<'a, T: Send + 'static> Scope<'a, T> {
         }
     }
 
+    #[allow(unused)]
     pub fn block_on(mut self) -> Result<T, JoinError> {
         let handle = self.handle.take().expect("spawn join handle");
         self.runtime.block_on(handle)
+    }
+
+    #[allow(unused)]
+    pub fn finish_or_abort(mut self) -> Result<T, JoinError> {
+        let task = self.handle.take().expect("task");
+        task.abort();
+        self.runtime.block_on(task)
     }
 }

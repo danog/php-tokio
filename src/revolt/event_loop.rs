@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::channel::Channel;
+use super::suspension::Suspension;
 use crate::async_scope::Scope;
-use crate::channel::Channel;
-use crate::suspension::Suspension;
 use ext_php_rs::{call_user_func, prelude::*, zend::Function};
 use lazy_static::lazy_static;
 use std::cell::RefCell;

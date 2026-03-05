@@ -1,5 +1,5 @@
 [package]
-name = "example-reqwest"
+name = "example-reqwest-native"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -9,7 +9,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-php-tokio = { path = "../..", features = ["revolt"] }
+php-tokio = { path = "../..", features = ["native"] }
 ext-php-rs = { version = "^0.15.6", features = ["anyhow"] }
 reqwest = "^0.11"
 anyhow = "^1.0"
