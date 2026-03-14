@@ -6,13 +6,7 @@ Here's a usage example of [php-tokio](https://github.com/danog/php-tokio/), usin
 <?php
 
 use Reqwest\Client;
-
-use function Amp\async;
-use function Amp\Future\await;
-
-require 'vendor/autoload.php';
-
-Client::init();
+use function PhpTokio\async;
 
 function test(int $delay): void {
     $url = "https://httpbin.org/delay/$delay";
@@ -23,12 +17,11 @@ function test(int $delay): void {
     echo "Got response from $url after ~".$t." seconds!".PHP_EOL;
 };
 
-$futures = [];
-$futures []= async(test(...), 5);
-$futures []= async(test(...), 5);
-$futures []= async(test(...), 5);
+async(fn() => test(5));
+async(fn() => test(5));
+async(fn() => test(5));
 
-await($futures);
+\PhpTokio\run();
 ```
 
 Usage:
@@ -36,7 +29,6 @@ Usage:
 ```bash
 cd examples/reqwest && \
     cargo build && \
-    composer update && \
     php -d extension=../../target/debug/libexample_reqwest.so test.php
 ```
 

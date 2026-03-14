@@ -9,12 +9,10 @@ authors = ["Daniil Gentili <daniil@daniil.it>"]
 edition = "2021"
 
 [dependencies]
-ext-php-rs = "^0.15.6"
-tokio = { version = "1", features = ["full"] }
-tokio-pipe = "^0.2"
-lazy_static = "1.4.0"
-libc = "^0.2"
+ext-php-rs = { version = "^0.15.6", features = ["closure"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 php-tokio-derive = { version = "=0.2.0", path = "./crates/macros" }
+tokio-util = { version = "0.7.18", default-features = false }
 
 
 [workspace]

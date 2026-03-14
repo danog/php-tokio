@@ -15,16 +15,32 @@
 use anyhow::{bail, Result};
 use proc_macro2::Span;
 use proc_macro2::TokenStream;
-use quote::TokenStreamExt;
 use quote::{quote, ToTokens};
 use syn::parse_quote;
-use syn::FnArg;
-use syn::GenericArgument;
-use syn::ImplItemFn;
-use syn::Pat;
-use syn::PathArguments;
-use syn::Type;
+use syn::{ImplItemFn, ItemFn};
 use syn::{parse_macro_input, ItemImpl};
+
+#[proc_macro_attribute]
+pub fn php_async_function(
+    _: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let mut input = parse_macro_input!(input as ItemFn);
+
+    input.attrs.insert(0, parse_quote!(#[php_function]));
+
+    if input.sig.asyncness.is_some() {
+        input.sig.asyncness = None;
+    }
+
+    let block = input.block;
+
+    input.block = parse_quote! {{
+        ::php_tokio::EventLoop::suspend_on(async move #block).unwrap()
+    }};
+
+    proc_macro::TokenStream::from(quote!(#input))
+}
 
 #[proc_macro_attribute]
 pub fn php_async_impl(
@@ -66,87 +82,12 @@ fn parser(input: ItemImpl) -> Result<TokenStream> {
 }
 
 fn handle_method(input: ImplItemFn) -> Result<TokenStream> {
-    let mut receiver = false;
-    let mut receiver_mutable = false;
-    let mut hack_tokens = quote! {};
-    for arg in input.sig.inputs.iter() {
-        match arg {
-            FnArg::Receiver(r) => {
-                receiver = true;
-                receiver_mutable = r.mutability.is_some();
-            }
-            FnArg::Typed(ty) => {
-                let mut this = false;
-                for attr in ty.attrs.iter() {
-                    if attr.path().to_token_stream().to_string() == "this" {
-                        this = true;
-                    }
-                }
-
-                if !this {
-                    let param = match &*ty.pat {
-                        Pat::Ident(pat) => &pat.ident,
-                        _ => bail!("Invalid parameter type."),
-                    };
-
-                    let mut ty_inner = &*ty.ty;
-                    let mut is_option = false;
-
-                    if let Type::Path(t) = ty_inner {
-                        if t.path.segments[0].ident.to_string() == "Option" {
-                            if let PathArguments::AngleBracketed(t) = &t.path.segments[0].arguments
-                            {
-                                if let GenericArgument::Type(t) = &t.args[0] {
-                                    ty_inner = t;
-                                    is_option = true;
-                                }
-                            }
-                        }
-                    }
-                    let mut is_str = false;
-                    if let Type::Reference(t) = ty_inner {
-                        if t.mutability.is_none() {
-                            if let Type::Path(t) = &*t.elem {
-                                is_str = t.path.is_ident("str");
-                            }
-                        }
-                        hack_tokens.append_all(if is_str {
-                            if is_option {
-                                quote! { let #param = #param.and_then(|__temp| Some(unsafe { ::core::mem::transmute::<&str, &'static str>(__temp) })); }
-                            } else {
-                                quote! { let #param = unsafe { ::core::mem::transmute::<&str, &'static str>(#param) }; }
-                            }
-                        } else {
-                            if is_option {
-                                quote! { let #param = #param.and_then(|__temp| Some(unsafe { ::php_tokio::borrow_unchecked::borrow_unchecked(__temp) })); }
-                            } else {
-                                quote! { let #param = unsafe { ::php_tokio::borrow_unchecked::borrow_unchecked(#param) }; }
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
     let mut input = input.clone();
     if input.sig.asyncness.is_some() {
         input.sig.asyncness = None;
         let stmts = input.block;
-        let this = if receiver {
-            if receiver_mutable {
-                quote! { let this = unsafe { std::mem::transmute::<&mut Self, &'static mut Self>(self) }; }
-            } else {
-                quote! { let this = unsafe { std::mem::transmute::<&Self, &'static Self>(self) }; }
-            }
-        } else {
-            quote! {}
-        };
         input.block = parse_quote! {{
-            #this
-            #hack_tokens
-
-            ::php_tokio::EventLoop::suspend_on(async move #stmts)
+            ::php_tokio::EventLoop::suspend_on(async move #stmts).unwrap()
         }};
     }
 
