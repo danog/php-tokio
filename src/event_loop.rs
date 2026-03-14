@@ -235,7 +235,7 @@ pub fn run() {
     }
 }
 
-pub fn setup_modules(module: ModuleBuilder) -> ModuleBuilder {
+pub fn setup_module(module: ModuleBuilder) -> ModuleBuilder {
     module
         .class::<Task>()
         .function(wrap_function!(delay))

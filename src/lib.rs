@@ -14,6 +14,6 @@
 
 mod event_loop;
 
-pub use event_loop::setup_modules;
+pub use event_loop::setup_module;
 pub use event_loop::EventLoop;
-pub use php_tokio_derive::php_async_impl;
+pub use php_tokio_derive::{php_async_function, php_async_impl};

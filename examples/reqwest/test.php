@@ -1,17 +1,11 @@
 <?php declare(strict_types=1);
 
 use Reqwest\Client;
-
-use function Amp\async;
-use function Amp\Future\await;
-
-require 'vendor/autoload.php';
+use function PhpTokio\async;
 
 if (!extension_loaded('example-reqwest')) {
     die("The example-reqwest extension is not loaded. Please load it to run this example.".PHP_EOL);
 }
-
-Client::init();
 
 function test(int $delay): void
 {
@@ -23,9 +17,8 @@ function test(int $delay): void
     echo "Got response from $url after ~".$t." seconds!".PHP_EOL;
 };
 
-$futures = [];
-$futures []= async(test(...), 5);
-$futures []= async(test(...), 5);
-$futures []= async(test(...), 5);
+async(fn() => test(5));
+async(fn() => test(5));
+async(fn() => test(5));
 
-await($futures);
+\PhpTokio\run();

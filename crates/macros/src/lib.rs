@@ -17,8 +17,30 @@ use proc_macro2::Span;
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 use syn::parse_quote;
-use syn::ImplItemFn;
+use syn::{ImplItemFn, ItemFn};
 use syn::{parse_macro_input, ItemImpl};
+
+#[proc_macro_attribute]
+pub fn php_async_function(
+    _: proc_macro::TokenStream,
+    input: proc_macro::TokenStream,
+) -> proc_macro::TokenStream {
+    let mut input = parse_macro_input!(input as ItemFn);
+
+    input.attrs.insert(0, parse_quote!(#[php_function]));
+
+    if input.sig.asyncness.is_some() {
+        input.sig.asyncness = None;
+    }
+
+    let block = input.block;
+
+    input.block = parse_quote! {{
+        ::php_tokio::EventLoop::suspend_on(async move #block)
+    }};
+
+    proc_macro::TokenStream::from(quote!(#input))
+}
 
 #[proc_macro_attribute]
 pub fn php_async_impl(
