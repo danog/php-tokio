@@ -36,7 +36,7 @@ pub fn php_async_function(
     let block = input.block;
 
     input.block = parse_quote! {{
-        ::php_tokio::EventLoop::suspend_on(async move #block)
+        ::php_tokio::EventLoop::suspend_on(async move #block).unwrap()
     }};
 
     proc_macro::TokenStream::from(quote!(#input))
@@ -87,7 +87,7 @@ fn handle_method(input: ImplItemFn) -> Result<TokenStream> {
         input.sig.asyncness = None;
         let stmts = input.block;
         input.block = parse_quote! {{
-            ::php_tokio::EventLoop::suspend_on(async move #stmts)
+            ::php_tokio::EventLoop::suspend_on(async move #stmts).unwrap()
         }};
     }
 

@@ -5,6 +5,7 @@ use ext_php_rs::zend::{ClassEntry, Function};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::{pending, Future};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::runtime::{Handle, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -27,8 +28,6 @@ struct Fiber(Zval);
 impl Fiber {
     fn suspend(&self) {
         self.0
-            .object()
-            .expect("fiber suspend object")
             .try_call_method("suspend", vec![])
             .expect("suspend fiber");
     }
@@ -92,23 +91,22 @@ impl EventLoop {
         }
     }
 
-    pub fn suspend_on<F>(future: F) -> F::Output
-    where
-        F: Future + Send,
-        F::Output: Send,
-    {
-        Self::execute(future).unwrap()
-    }
-
     pub fn execute_cancellable<F>(
         future: F,
         cancel: CancellationToken,
     ) -> PhpResult<Option<F::Output>>
     where
         F: Future + Send,
-        F::Output: Send,
+        F::Output: Send + 'static,
     {
-        let (tx, rx) = std::sync::mpsc::channel::<F::Output>();
+        EventLoop::suspend_on(cancel.run_until_cancelled(future))
+    }
+
+    pub fn suspend_on<F>(future: F) -> PhpResult<F::Output>
+    where
+        F: Future + Send,
+        F::Output: Send + 'static,
+    {
         let (fiber, id_tx, next, handle) = DRIVER.with_borrow_mut(|d| {
             let id_tx = d.tx.clone();
             let fiber = Fiber(d.fiber_get_current.try_call(vec![]).unwrap());
@@ -117,38 +115,29 @@ impl EventLoop {
             d.next += 1;
             (fiber, id_tx, next, d.handle.clone())
         });
-        let (_, spawn_result) = async_scoped::TokioScope::scope_and_block(|s| {
-            let _handle = Handle::try_current().map_err(|_| handle.enter());
-            s.spawn(cancel.run_until_cancelled(async move {
-                tx.send(future.await).unwrap();
-                let _ = id_tx.send(next);
-            }));
-            fiber.suspend();
+        let f = handle.spawn(unsafe {
+            #[allow(clippy::missing_transmute_annotations)]
+            std::mem::transmute::<_, Pin<Box<dyn Future<Output = F::Output> + Send>>>(Box::pin(
+                async move {
+                    let result = future.await;
+                    let _ = id_tx.send(next);
+                    result
+                },
+            )
+                as Pin<Box<dyn Future<Output = F::Output>>>)
         });
-        match spawn_result.first() {
-            Some(Ok(None)) => Ok(None),
-            _ => rx.try_recv().map(Some).map_err(|_| {
-                PhpException::default("unexpected rust driver receive async error".into())
-            }),
-        }
-    }
-
-    pub fn execute<F>(future: F) -> PhpResult<F::Output>
-    where
-        F: Future + Send,
-        F::Output: Send,
-    {
-        let result = Self::execute_cancellable(future, CancellationToken::new());
-        result.map(|r| {
-            r.ok_or_else(|| PhpException::default("unexpected cancelled async function".into()))
-        })?
+        // todo: to make the above unsafe safe we should make sure not to allow suspend to panic or create some kind of gaurd that would still block even if suspend paniced
+        fiber.suspend();
+        handle
+            .block_on(f)
+            .map_err(|e| PhpException::default(e.to_string()))
     }
 }
 
 #[php_function]
 #[php(name = "PhpTokio\\sleep")]
 pub fn sleep(seconds: f64) -> PhpResult<()> {
-    EventLoop::execute(async move {
+    EventLoop::suspend_on(async move {
         let duration = Duration::from_secs_f64(seconds);
         tokio::time::sleep(duration).await;
     })

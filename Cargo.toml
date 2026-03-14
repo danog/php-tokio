@@ -13,7 +13,6 @@ ext-php-rs = { version = "^0.15.6", features = ["closure"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 php-tokio-derive = { version = "=0.2.0", path = "./crates/macros" }
 tokio-util = { version = "0.7.18", default-features = false }
-async-scoped = { version = "0.9.0", features = ["use-tokio"] }
 
 
 [workspace]
