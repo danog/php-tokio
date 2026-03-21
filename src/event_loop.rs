@@ -18,10 +18,8 @@ use ext_php_rs::{call_user_func, prelude::*, zend::Function};
 use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
-    fs::File,
     future::Future,
-    io::{self, Read, Write},
-    os::fd::{AsRawFd, FromRawFd, RawFd},
+    io,
     sync::mpsc::{channel, Receiver, Sender},
 };
 use tokio::runtime::Runtime;
@@ -34,9 +32,20 @@ thread_local! {
     static EVENTLOOP: RefCell<Option<EventLoop>> = RefCell::new(None);
 }
 
+/// Number of bytes written/read per notification event.
+const NOTIFY_BYTE_LEN: usize = 1;
+
+/// Create a non-blocking pipe and return `(read_fd, write_fd)`.
+///
+/// On Linux/Solaris we use `pipe2` for a one-syscall, race-free setup.
+/// On macOS we fall back to `pipe` + `fcntl`.
+/// On Windows we create a loopback TCP socket pair and convert the
+/// SOCKET handles to CRT file descriptors with `_open_osfhandle` so that
+/// the same `libc::read` / `libc::write` / `libc::close` calls work on
+/// every platform.
 #[cfg(any(target_os = "linux", target_os = "solaris"))]
-fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
-    let mut pipefd = [0; 2];
+fn sys_pipe() -> io::Result<(i32, i32)> {
+    let mut pipefd = [0i32; 2];
     let ret = unsafe { libc::pipe2(pipefd.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
     if ret == -1 {
         return Err(io::Error::last_os_error());
@@ -44,56 +53,87 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
     Ok((pipefd[0], pipefd[1]))
 }
 
-#[cfg(any(target_os = "macos"))]
-fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    use libc::fcntl;
-    use libc::{FD_CLOEXEC, F_GETFD, F_SETFD};
+#[cfg(target_os = "macos")]
+fn sys_pipe() -> io::Result<(i32, i32)> {
+    use libc::{fcntl, FD_CLOEXEC, F_GETFD, F_SETFD, F_SETFL, O_NONBLOCK};
 
-    let flags = unsafe { fcntl(fd, F_GETFD, 0) };
-    if flags == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    let ret = unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos"))]
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
-    use libc::{fcntl, F_SETFL, O_NONBLOCK};
-
-    let ret = unsafe { fcntl(fd, F_SETFL, O_NONBLOCK) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos"))]
-fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
-    let mut pipefd = [0; 2];
+    let mut pipefd = [0i32; 2];
     let ret = unsafe { libc::pipe(pipefd.as_mut_ptr()) };
-
     if ret == -1 {
         return Err(io::Error::last_os_error());
     }
 
-    for fd in &pipefd {
-        set_cloexec(*fd)?;
-        set_nonblocking(*fd)?;
+    for &fd in &pipefd {
+        let flags = unsafe { fcntl(fd, F_GETFD, 0) };
+        if flags == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let ret = unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let ret = unsafe { fcntl(fd, F_SETFL, O_NONBLOCK) };
+        if ret == -1 {
+            return Err(io::Error::last_os_error());
+        }
     }
+
     Ok((pipefd[0], pipefd[1]))
+}
+
+/// Windows: create a connected TCP loopback socket pair and expose both
+/// ends as CRT file descriptors so that `libc::read` / `libc::write` /
+/// `libc::close` can be used uniformly across all platforms.
+#[cfg(windows)]
+fn sys_pipe() -> io::Result<(i32, i32)> {
+    use std::net::{TcpListener, TcpStream};
+    use std::os::windows::io::IntoRawSocket;
+
+    // Bind to an ephemeral loopback port.
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+
+    // Connect the write end before accepting so the handshake completes
+    // before we block on `accept`.
+    let writer = TcpStream::connect(addr)?;
+    let (reader, _peer_addr) = listener.accept()?;
+
+    reader.set_nonblocking(true)?;
+    writer.set_nonblocking(true)?;
+
+    // Consume the Rust wrappers without closing the underlying OS handles.
+    let reader_socket = reader.into_raw_socket(); // SOCKET (uintptr_t)
+    let writer_socket = writer.into_raw_socket();
+
+    // Wrap each SOCKET in a CRT file descriptor.  Windows CRT routes
+    // _read/_write through ReadFile/WriteFile on the underlying HANDLE,
+    // which works correctly for connected TCP sockets.
+    let reader_fd = unsafe {
+        libc::_open_osfhandle(reader_socket as libc::intptr_t, libc::O_RDONLY | libc::O_BINARY)
+    };
+    let writer_fd = unsafe {
+        libc::_open_osfhandle(writer_socket as libc::intptr_t, libc::O_WRONLY | libc::O_BINARY)
+    };
+
+    if reader_fd == -1 || writer_fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok((reader_fd, writer_fd))
 }
 
 pub struct EventLoop {
     sender: Sender<Suspension>,
     receiver: Receiver<Suspension>,
 
-    notify_sender: File,
-    notify_receiver: File,
+    /// Raw OS / CRT file descriptor for the *write* end of the
+    /// notification channel.  An `i32` is `Copy`, so it can be
+    /// captured by value in async tasks without requiring `dup`.
+    notify_sender: i32,
+
+    /// Raw OS / CRT file descriptor for the *read* end.
+    /// Returned to PHP so that Revolt can poll it for readability.
+    notify_receiver: i32,
 
     get_current_suspension: Function,
 
@@ -113,6 +153,15 @@ struct Suspension(Zval);
 unsafe impl Send for Suspension {}
 unsafe impl Sync for Suspension {}
 
+impl Drop for EventLoop {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.notify_sender);
+            libc::close(self.notify_receiver);
+        }
+    }
+}
+
 impl EventLoop {
     pub fn init() -> PhpResult<u64> {
         EVENTLOOP.with_borrow_mut(|e| {
@@ -120,8 +169,7 @@ impl EventLoop {
                 None => e.insert(Self::new()?),
                 Some(ev) => ev,
             }
-            .notify_receiver
-            .as_raw_fd() as u64)
+            .notify_receiver as u64)
         })
     }
 
@@ -146,13 +194,23 @@ impl EventLoop {
             let suspension = Suspension(call_user_func!(c.get_current_suspension).unwrap());
 
             let sender = c.sender.clone();
-            let mut notifier = c.notify_sender.try_clone().unwrap();
+            // `i32` is `Copy` — no need to dup the fd.
+            // Single-byte writes to a pipe / connected socket are atomic,
+            // so concurrent writes from multiple tasks are safe.
+            let notify_fd = c.notify_sender;
 
             (
                 RUNTIME.spawn(async move {
                     let res = future.await;
                     sender.send(suspension).unwrap();
-                    notifier.write_all(&[0]).unwrap();
+                    // Notify the PHP event loop that a suspension is ready.
+                    unsafe {
+                        libc::write(
+                            notify_fd,
+                            b"\x00".as_ptr() as *const libc::c_void,
+                            NOTIFY_BYTE_LEN as _,
+                        )
+                    };
                     res
                 }),
                 unsafe { borrow_unchecked(&c.get_current_suspension) },
@@ -174,10 +232,23 @@ impl EventLoop {
         EVENTLOOP.with_borrow_mut(|c| {
             let c = c.as_mut().unwrap();
 
-            while let Ok(1) = c.notify_receiver.read(&mut c.dummy) {}
+            // Drain all pending notification bytes.  A non-blocking read
+            // returns ≤ 0 when no more data is available (EAGAIN / EOF).
+            loop {
+                let n = unsafe {
+                    libc::read(
+                        c.notify_receiver,
+                        c.dummy.as_mut_ptr() as *mut libc::c_void,
+                        NOTIFY_BYTE_LEN as _,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+            }
 
-            for mut suspesion in c.receiver.try_iter() {
-                suspesion
+            for mut suspension in c.receiver.try_iter() {
+                suspension
                     .0
                     .object_mut()
                     .unwrap()
@@ -218,8 +289,8 @@ impl EventLoop {
         Ok(Self {
             sender,
             receiver,
-            notify_sender: unsafe { File::from_raw_fd(notify_sender) },
-            notify_receiver: unsafe { File::from_raw_fd(notify_receiver) },
+            notify_sender,
+            notify_receiver,
             dummy: [0; 1],
             get_current_suspension: Function::try_from_method(
                 "\\Revolt\\EventLoop",

@@ -13,3 +13,4 @@ php-tokio = { path = "../.." }
 ext-php-rs = { version = "^0.15.6", features = ["anyhow"] }
 reqwest = "^0.11"
 anyhow = "^1.0"
+tokio = { version = "1", features = ["time"] }
