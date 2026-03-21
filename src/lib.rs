@@ -13,8 +13,9 @@
 // limitations under the License.
 
 mod async_scope;
+mod channel;
 mod event_loop;
+mod suspension;
 
-pub use event_loop::EventLoop;
-pub use event_loop::RUNTIME;
+pub use event_loop::{EventLoop, RUNTIME};
 pub use php_tokio_derive::php_async_impl;
