@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout
+      # -----------------------------------------------------------------------
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Rust toolchain
+      # -----------------------------------------------------------------------
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            examples/reqwest/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # -----------------------------------------------------------------------
+      # PHP
+      # -----------------------------------------------------------------------
+      - name: Install PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          coverage: none
+
+      # -----------------------------------------------------------------------
+      # Build the example extension
+      # -----------------------------------------------------------------------
+      - name: Build example-reqwest extension
+        working-directory: examples/reqwest
+        run: cargo build
+
+      # -----------------------------------------------------------------------
+      # PHP dependencies (Revolt + Amp)
+      # -----------------------------------------------------------------------
+      - name: Install Composer dependencies
+        working-directory: examples/reqwest
+        run: composer install --no-interaction --prefer-dist
+
+      # -----------------------------------------------------------------------
+      # Run the local test suite
+      # -----------------------------------------------------------------------
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: examples/reqwest
+        run: php -d extension=../../target/debug/libexample_reqwest.so test_local.php
+
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
+        working-directory: examples/reqwest
+        run: php -d extension=../../target/debug/libexample_reqwest.dylib test_local.php
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        working-directory: examples/reqwest
+        run: php -d extension=..\..\target\debug\example_reqwest.dll test_local.php
