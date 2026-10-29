@@ -12,40 +12,84 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Tokio threads tell PHP that futures completed through a pipe, whose read end PHP watches
-//! (`EventLoop::onReadable` on `php://fd/<fd>`).
+//! Tokio threads tell PHP that futures completed through a connected pair of stream sockets:
+//! PHP watches its end for readability.
+//!
+//! A socket, not a pipe: on Windows, PHP's select() emulation hands sockets alone to the real
+//! select(), but polls any other descriptor (a pipe, or a socket opened as a file through
+//! php://fd/) in 100 ms slices interleaved with the sockets, delaying every wakeup. PHP gets
+//! its end as a socket stream of its own (`Receiver::php_stream`).
 
+use ext_php_rs::{ffi, prelude::*, types::Zval};
 use std::{
     io::{self, Read, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(unix)]
+type Socket = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Socket = std::net::TcpStream;
+
+/// Written from any thread.
 pub(crate) struct Notifier {
-    /// Set while a notification is in the pipe: at most one or two bytes are ever in it, so a
-    /// write never meets a full pipe (which fails on Unix, and blocks on Windows).
+    /// Set while a notification is in the socket: at most one or two bytes are ever in it, so a
+    /// write never meets a full buffer.
     pending: AtomicBool,
-    pipe: Pipe,
+    writer: Socket,
+}
+
+/// PHP's end, used on the PHP thread.
+pub(crate) struct Receiver {
+    /// Rust's own handle on PHP's end, to drain it.
+    reader: Socket,
+}
+
+pub(crate) fn channel() -> io::Result<(Notifier, Receiver)> {
+    let (writer, reader) = pair()?;
+    writer.set_nonblocking(true)?;
+    reader.set_nonblocking(true)?;
+    Ok((
+        Notifier {
+            pending: AtomicBool::new(false),
+            writer,
+        },
+        Receiver { reader },
+    ))
+}
+
+#[cfg(unix)]
+fn pair() -> io::Result<(Socket, Socket)> {
+    Socket::pair()
+}
+
+/// Windows has no socketpair(): connect two TCP sockets on the loopback interface, as PHP's and
+/// Python's socketpair() emulations do. Only the connection from our own socket is accepted.
+#[cfg(windows)]
+fn pair() -> io::Result<(Socket, Socket)> {
+    use std::net::{Ipv4Addr, TcpListener};
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    let writer = Socket::connect(listener.local_addr()?)?;
+    let ours = writer.local_addr()?;
+    let reader = loop {
+        let (reader, peer) = listener.accept()?;
+        if peer == ours {
+            break reader;
+        }
+    };
+    // One-byte writes: don't let Nagle's algorithm hold them back.
+    writer.set_nodelay(true)?;
+    Ok((writer, reader))
 }
 
 impl Notifier {
-    pub(crate) fn new() -> io::Result<Self> {
-        Ok(Self {
-            pending: AtomicBool::new(false),
-            pipe: Pipe::new()?,
-        })
-    }
-
-    /// The descriptor PHP watches for readability.
-    pub(crate) fn php_fd(&self) -> u64 {
-        self.pipe.php_fd
-    }
-
     /// Wakes PHP up: called by any thread, once the completion is published.
     pub(crate) fn notify(&self) {
         if self.pending.swap(true, Ordering::SeqCst) {
             return;
         }
-        let mut writer = &self.pipe.writer;
+        let mut writer = &self.writer;
         loop {
             match writer.write(&[0]) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -54,135 +98,108 @@ impl Notifier {
         }
     }
 
-    /// Consumes the notifications: called on the PHP thread, before collecting the completions.
+    /// Re-arms the notification: called on the PHP thread after draining the receiver, and
+    /// before collecting the completions.
     ///
-    /// The pipe is emptied before the flag is cleared: until then nobody writes (the flag is set),
-    /// and a completion published afterwards writes a byte that stays in the pipe. A completion
-    /// that skipped its write published its result before seeing the flag set, so it is collected
-    /// right after. Clearing the flag first would let the reads consume a byte written meanwhile,
-    /// leaving the flag set with an empty pipe: no later completion would ever wake PHP up.
-    pub(crate) fn drain(&self) {
-        let mut buffer = [0; 64];
-        while let Some(available) = self.pipe.available() {
-            let mut reader = &self.pipe.reader;
-            match reader.read(&mut buffer[..available.min(64)]) {
-                Ok(n) if n > 0 => continue,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                _ => break,
-            }
-        }
+    /// The socket is drained before the flag is cleared: until then nobody writes (the flag is
+    /// set), and a completion published afterwards writes a byte that stays in the socket. A
+    /// completion that skipped its write published its result before seeing the flag set, so it
+    /// is collected right after. Clearing the flag first would let the drain consume a byte
+    /// written meanwhile, leaving the flag set with an empty socket: no later completion would
+    /// ever wake PHP up.
+    pub(crate) fn rearm(&self) {
         self.pending.store(false, Ordering::SeqCst);
     }
 }
 
-#[cfg(unix)]
-struct Pipe {
-    reader: std::fs::File,
-    writer: std::fs::File,
-    php_fd: u64,
-}
+impl Receiver {
+    /// Consumes the notifications in PHP's end.
+    pub(crate) fn drain(&self) {
+        let mut buffer = [0; 64];
+        let mut reader = &self.reader;
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(n) if n > 0 => continue,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // Empty (WouldBlock), or closed.
+                _ => break,
+            }
+        }
+    }
 
-#[cfg(unix)]
-impl Pipe {
-    fn new() -> io::Result<Self> {
-        use std::os::fd::{AsRawFd, FromRawFd};
+    /// The descriptor of PHP's end, for `php://fd/<fd>`.
+    #[cfg(unix)]
+    pub(crate) fn fd(&self) -> u64 {
+        use std::os::fd::AsRawFd;
+        self.reader.as_raw_fd() as u64
+    }
 
-        let (reader, writer) = sys_pipe()?;
-        // SAFETY: both descriptors were just created, and are owned only here.
-        let (reader, writer) = unsafe {
-            (
-                std::fs::File::from_raw_fd(reader),
-                std::fs::File::from_raw_fd(writer),
-            )
+    /// PHP's end as a PHP socket stream, for `EventLoop::onReadable`: a new descriptor for the
+    /// same socket, owned by the stream.
+    pub(crate) fn php_stream(&self) -> PhpResult<Zval> {
+        let socket = into_php_socket(self.reader.try_clone().map_err(|e| e.to_string())?);
+        let stream = unsafe {
+            if ext_php_rs::PHP_DEBUG {
+                let file = c"php-tokio".as_ptr();
+                _php_stream_sock_open_from_socket_debug(socket, std::ptr::null(), file, 0, file, 0)
+            } else {
+                _php_stream_sock_open_from_socket(socket, std::ptr::null())
+            }
         };
-        let php_fd = reader.as_raw_fd() as u64;
-        Ok(Self {
-            reader,
-            writer,
-            php_fd,
-        })
-    }
-
-    /// The pipe is non-blocking: read until it is empty.
-    fn available(&self) -> Option<usize> {
-        Some(64)
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "solaris"))]
-fn sys_pipe() -> io::Result<(i32, i32)> {
-    let mut pipefd = [0; 2];
-    let ret = unsafe { libc::pipe2(pipefd.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((pipefd[0], pipefd[1]))
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "solaris"))))]
-fn sys_pipe() -> io::Result<(i32, i32)> {
-    use libc::{fcntl, FD_CLOEXEC, F_GETFD, F_GETFL, F_SETFD, F_SETFL, O_NONBLOCK};
-
-    let mut pipefd = [0; 2];
-    if unsafe { libc::pipe(pipefd.as_mut_ptr()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    for fd in pipefd {
-        let flags = unsafe { fcntl(fd, F_GETFD) };
-        if flags == -1 || unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) } == -1 {
-            return Err(io::Error::last_os_error());
+        if stream.is_null() {
+            close_php_socket(socket);
+            return Err("Could not open the notification socket as a PHP stream".into());
         }
-        let flags = unsafe { fcntl(fd, F_GETFL) };
-        if flags == -1 || unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } == -1 {
-            return Err(io::Error::last_os_error());
+        // php_stream_to_zval(): the zval takes over the stream's reference.
+        let mut zval = Zval::new();
+        unsafe {
+            zval.set_resource((*stream).res);
+            (*stream).set___exposed(1);
         }
+        Ok(zval)
     }
-    Ok((pipefd[0], pipefd[1]))
 }
 
-/// An anonymous pipe: PHP's select() emulation on Windows reports a pipe as readable only when
-/// PeekNamedPipe finds data in it (a socket handle passed as a file descriptor would always be
-/// reported as ready). Windows pipes have no non-blocking mode: reads only take what is there.
+#[cfg(unix)]
+type PhpSocket = std::ffi::c_int;
 #[cfg(windows)]
-struct Pipe {
-    reader: io::PipeReader,
-    writer: io::PipeWriter,
-    php_fd: u64,
+type PhpSocket = usize;
+
+#[cfg(unix)]
+fn into_php_socket(socket: Socket) -> PhpSocket {
+    std::os::fd::IntoRawFd::into_raw_fd(socket)
+}
+#[cfg(windows)]
+fn into_php_socket(socket: Socket) -> PhpSocket {
+    std::os::windows::io::IntoRawSocket::into_raw_socket(socket) as PhpSocket
 }
 
+#[cfg(unix)]
+fn close_php_socket(socket: PhpSocket) {
+    drop(unsafe { <Socket as std::os::fd::FromRawFd>::from_raw_fd(socket) });
+}
 #[cfg(windows)]
-impl Pipe {
-    fn new() -> io::Result<Self> {
-        use std::os::windows::io::IntoRawHandle;
+fn close_php_socket(socket: PhpSocket) {
+    drop(unsafe { <Socket as std::os::windows::io::FromRawSocket>::from_raw_socket(socket as _) });
+}
 
-        let (reader, writer) = io::pipe()?;
-        // PHP opens php://fd/<fd> with a CRT file descriptor: give it one for a duplicate handle.
-        let handle = reader.try_clone()?.into_raw_handle();
-        let php_fd = unsafe { libc::open_osfhandle(handle as libc::intptr_t, libc::O_RDONLY) };
-        if php_fd == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            reader,
-            writer,
-            php_fd: php_fd as u64,
-        })
-    }
+// PHPAPI php_stream *_php_stream_sock_open_from_socket(php_socket_t socket,
+//     const char *persistent_id STREAMS_DC), from main/php_network.h: STREAMS_DC adds the
+// caller's file and line, twice, in debug builds of PHP.
+#[allow(clashing_extern_declarations)]
+extern "C" {
+    fn _php_stream_sock_open_from_socket(
+        socket: PhpSocket,
+        persistent_id: *const std::ffi::c_char,
+    ) -> *mut ffi::php_stream;
 
-    fn available(&self) -> Option<usize> {
-        use std::os::windows::io::AsRawHandle;
-
-        let mut available = 0u32;
-        let ok = unsafe {
-            windows_sys::Win32::System::Pipes::PeekNamedPipe(
-                self.reader.as_raw_handle(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null_mut(),
-                &mut available,
-                std::ptr::null_mut(),
-            )
-        };
-        (ok != 0 && available > 0).then_some(available as usize)
-    }
+    #[link_name = "_php_stream_sock_open_from_socket"]
+    fn _php_stream_sock_open_from_socket_debug(
+        socket: PhpSocket,
+        persistent_id: *const std::ffi::c_char,
+        file: *const std::ffi::c_char,
+        line: u32,
+        orig_file: *const std::ffi::c_char,
+        orig_line: u32,
+    ) -> *mut ffi::php_stream;
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::notify::Notifier;
+use crate::notify::{self, Notifier, Receiver};
 use ext_php_rs::{
     call_user_func,
     convert::IntoZval,
@@ -26,10 +26,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     future::Future,
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc, Condvar, Mutex,
-    },
+    sync::{mpsc, Arc, Condvar, Mutex},
 };
 use tokio::runtime::Runtime;
 
@@ -73,17 +70,40 @@ pub struct EventLoop {
     /// PHP thread: only the IDs of the completed futures cross threads.
     suspensions: HashMap<u64, Zval>,
     next: u64,
-    sender: Sender<u64>,
-    receiver: Receiver<u64>,
+    /// The IDs of the completed futures.
+    completions: mpsc::Sender<u64>,
+    completed: mpsc::Receiver<u64>,
 
     /// Wakes PHP up when futures complete: shared by every future.
     notifier: Arc<Notifier>,
+    receiver: Receiver,
 
     get_current_suspension: Function,
 }
 
 impl EventLoop {
+    /// Initializes the event loop, returning the stream to watch for readability, calling
+    /// `wakeup()` when it is readable:
+    ///
+    /// ```php
+    /// $stream = Extension::initStream();
+    /// Revolt\EventLoop::onReadable($stream, fn () => Extension::wakeup());
+    /// ```
+    pub fn init_stream() -> PhpResult<Zval> {
+        Self::with_initialized(|event_loop| event_loop.receiver.php_stream())
+    }
+
+    /// Initializes the event loop, returning the descriptor to open as `php://fd/<fd>` and watch
+    /// for readability. Unix only: on Windows, PHP can only watch the stream from `init_stream()`
+    /// without delays.
     pub fn init() -> PhpResult<u64> {
+        #[cfg(unix)]
+        return Self::with_initialized(|event_loop| Ok(event_loop.receiver.fd()));
+        #[cfg(not(unix))]
+        return Err("Use php_tokio::EventLoop::init_stream() on this platform".into());
+    }
+
+    fn with_initialized<T>(f: impl FnOnce(&EventLoop) -> PhpResult<T>) -> PhpResult<T> {
         EVENTLOOP.with_borrow_mut(|e| {
             let event_loop = match e {
                 None => e.insert(Self::new()?),
@@ -94,7 +114,7 @@ impl EventLoop {
                     "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
                 );
             }
-            Ok(event_loop.notifier.php_fd())
+            f(event_loop)
         })
     }
 
@@ -136,13 +156,13 @@ impl EventLoop {
             let id = c.next;
             c.suspensions.insert(id, suspension.shallow_clone());
 
-            let sender = c.sender.clone();
+            let completions = c.completions.clone();
             let notifier = c.notifier.clone();
             let result = slot.clone();
             RUNTIME.spawn(async move {
                 result.set(future.await);
                 // Only the ID crosses threads, never a PHP value.
-                let _ = sender.send(id);
+                let _ = completions.send(id);
                 notifier.notify();
             });
             (id, suspension)
@@ -173,8 +193,9 @@ impl EventLoop {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
-            c.notifier.drain();
-            Ok(c.receiver
+            c.receiver.drain();
+            c.notifier.rearm();
+            Ok(c.completed
                 .try_iter()
                 .filter_map(|id| c.suspensions.remove(&id))
                 .collect())
@@ -208,8 +229,9 @@ impl EventLoop {
     }
 
     pub fn new() -> PhpResult<Self> {
-        let (sender, receiver) = channel();
-        let notifier = Notifier::new().map_err(|err| format!("Could not create pipe: {}", err))?;
+        let (completions, completed) = mpsc::channel();
+        let (notifier, receiver) = notify::channel()
+            .map_err(|err| format!("Could not create the notification socket: {}", err))?;
 
         if !call_user_func!(
             Function::try_from_function("class_exists").unwrap(),
@@ -234,9 +256,10 @@ impl EventLoop {
             pid: std::process::id(),
             suspensions: HashMap::new(),
             next: 0,
-            sender,
-            receiver,
+            completions,
+            completed,
             notifier: Arc::new(notifier),
+            receiver,
             get_current_suspension: Function::try_from_method(
                 "\\Revolt\\EventLoop",
                 "getSuspension",

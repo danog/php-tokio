@@ -18,8 +18,7 @@ final class Bridge
         if (self::$watcher !== null) {
             return;
         }
-        $stream = fopen('php://fd/'.Native::init(), 'r');
-        \assert($stream !== false);
+        $stream = Native::initStream();
         stream_set_blocking($stream, false);
         self::$watcher = EventLoop::onReadable($stream, static fn () => Native::wakeup());
     }

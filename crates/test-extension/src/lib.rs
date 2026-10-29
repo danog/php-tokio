@@ -16,7 +16,7 @@
 
 #![cfg_attr(windows, feature(abi_vectorcall))]
 
-use ext_php_rs::prelude::*;
+use ext_php_rs::{prelude::*, types::Zval};
 use php_tokio::{php_async_impl, EventLoop};
 use std::time::Duration;
 
@@ -26,8 +26,8 @@ pub struct Native;
 
 #[php_async_impl]
 impl Native {
-    pub fn init() -> PhpResult<u64> {
-        EventLoop::init()
+    pub fn init_stream() -> PhpResult<Zval> {
+        EventLoop::init_stream()
     }
 
     pub fn wakeup() -> PhpResult<()> {

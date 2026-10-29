@@ -71,6 +71,27 @@ final class EventLoopTest extends TestCase
         self::assertSame($value, $future->await());
     }
 
+    public function testResultsArriveWithoutDelayWhilePhpWatchesSockets(): void
+    {
+        // PHP's select() emulation on Windows polls anything but sockets in 100 ms slices once it
+        // also watches sockets: the notifications must come through a socket of PHP's own.
+        $server = stream_socket_server('tcp://127.0.0.1:0');
+        \assert($server !== false);
+        $watcher = EventLoop::onReadable($server, static fn () => null);
+        EventLoop::unreference($watcher);
+        try {
+            $start = hrtime(true);
+            for ($i = 0; $i < 20; $i++) {
+                self::assertSame(1, Native::sleep(1));
+            }
+            $elapsed = (hrtime(true) - $start) / 1e9;
+            self::assertLessThan(0.5, $elapsed, sprintf('20 results of 1 ms futures took %.3f s', $elapsed));
+        } finally {
+            EventLoop::cancel($watcher);
+            fclose($server);
+        }
+    }
+
     public function testErrorsBecomeExceptions(): void
     {
         try {
@@ -141,7 +162,7 @@ final class EventLoopTest extends TestCase
         if ($pid === 0) {
             // Tokio's threads aren't inherited: initializing again must fail.
             try {
-                Native::init();
+                Native::initStream();
                 $code = 1;
             } catch (\Throwable $e) {
                 $code = str_contains($e->getMessage(), 'fork') ? 0 : 2;
