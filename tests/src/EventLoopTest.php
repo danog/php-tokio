@@ -83,14 +83,16 @@ final class EventLoopTest extends TestCase
 
     public function testFuturesCompletingWhilePhpIsBusy(): void
     {
-        // More completions than a pipe buffer holds (16 KiB by default on macOS) arrive while
-        // the PHP thread is busy, before any wakeup.
+        // Many completions arrive while the PHP thread is busy, before any wakeup: more than a
+        // pipe buffer holds (16 KiB by default on macOS). Windows commits every fiber's stack
+        // (2 MiB by default) when the fiber starts, so fewer callers fit there.
+        $count = PHP_OS_FAMILY === 'Windows' ? 2_000 : 20_000;
         $futures = [];
-        for ($i = 0; $i < 20_000; $i++) {
+        for ($i = 0; $i < $count; $i++) {
             $futures[] = async(Native::sleep(...), 50);
         }
         EventLoop::queue(static fn () => usleep(500_000));
-        self::assertSame(array_fill(0, 20_000, 50), self::awaitAll($futures));
+        self::assertSame(array_fill(0, $count, 50), self::awaitAll($futures));
     }
 
     public function testWakeupWithoutCompletionsDoesNothing(): void
