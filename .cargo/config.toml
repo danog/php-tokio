@@ -1,0 +1,7 @@
+# PHP extensions resolve PHP's symbols when PHP loads them.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+# Suggested by ext-php-rs for Windows.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

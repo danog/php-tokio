@@ -14,6 +14,7 @@
 
 pub mod borrow_unchecked;
 mod event_loop;
+mod notify;
 
 pub use event_loop::EventLoop;
 pub use event_loop::RUNTIME;

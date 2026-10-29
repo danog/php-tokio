@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  lint:
+    name: rustfmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          coverage: none
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: ${{ matrix.os }}, PHP ${{ matrix.php }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        php: ["8.2", "8.5"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+          tools: composer
+          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
+
+      # ext-php-rs needs nightly on Windows, for the vectorcall calling convention.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ runner.os == 'Windows' && 'nightly' || 'stable' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: php-${{ matrix.php }}
+
+      - name: Build the extensions
+        run: cargo build --release --workspace
+
+      - name: Install the test suite's dependencies
+        working-directory: tests
+        run: composer install --no-interaction --no-progress
+
+      - name: Run the test suite
+        working-directory: tests
+        run: |
+          case "$RUNNER_OS" in
+            Linux) extension=../target/release/libphp_tokio_test_extension.so ;;
+            macOS) extension=../target/release/libphp_tokio_test_extension.dylib ;;
+            Windows) extension=../target/release/php_tokio_test_extension.dll ;;
+          esac
+          php -d "extension=$extension" vendor/bin/phpunit

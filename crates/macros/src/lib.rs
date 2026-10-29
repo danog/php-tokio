@@ -93,7 +93,7 @@ fn handle_method(input: ImplItemFn) -> Result<TokenStream> {
                     let mut is_option = false;
 
                     if let Type::Path(t) = ty_inner {
-                        if t.path.segments[0].ident.to_string() == "Option" {
+                        if t.path.segments[0].ident == "Option" {
                             if let PathArguments::AngleBracketed(t) = &t.path.segments[0].arguments
                             {
                                 if let GenericArgument::Type(t) = &t.args[0] {

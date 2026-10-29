@@ -1,3 +1,5 @@
+#![cfg_attr(windows, feature(abi_vectorcall))]
+
 use ext_php_rs::prelude::*;
 use php_tokio::{php_async_impl, EventLoop};
 
@@ -14,10 +16,6 @@ impl Client {
     }
     pub async fn get(url: &str) -> anyhow::Result<String> {
         Ok(reqwest::get(url).await?.text().await?)
-    }
-    pub async fn sleep(ms: u64) -> u64 {
-        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-        ms
     }
 }
 

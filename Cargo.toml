@@ -11,15 +11,17 @@ edition = "2021"
 [dependencies]
 ext-php-rs = "^0.16.3"
 tokio = { version = "1.53", features = ["full"] }
-tokio-pipe = "^0.2.12"
 lazy_static = "1.5.0"
 libc = "^0.2.189"
 php-tokio-derive = { version = "=0.2.0", path = "./crates/macros" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Pipes"] }
 
 [workspace]
 members = [
     "crates/macros",
+    "crates/test-extension",
     "examples/reqwest",
 ]
 

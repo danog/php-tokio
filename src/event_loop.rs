@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::notify::Notifier;
 use ext_php_rs::{
     call_user_func,
     convert::IntoZval,
@@ -24,10 +25,7 @@ use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fs::File,
     future::Future,
-    io::{self, Read, Write},
-    os::fd::{AsRawFd, FromRawFd, RawFd},
     sync::{
         mpsc::{channel, Receiver, Sender},
         Arc, Condvar, Mutex,
@@ -41,60 +39,6 @@ lazy_static! {
 
 thread_local! {
     static EVENTLOOP: RefCell<Option<EventLoop>> = const { RefCell::new(None) };
-}
-
-#[cfg(any(target_os = "linux", target_os = "solaris"))]
-fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
-    let mut pipefd = [0; 2];
-    let ret = unsafe { libc::pipe2(pipefd.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((pipefd[0], pipefd[1]))
-}
-
-#[cfg(any(target_os = "macos"))]
-fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    use libc::fcntl;
-    use libc::{FD_CLOEXEC, F_GETFD, F_SETFD};
-
-    let flags = unsafe { fcntl(fd, F_GETFD, 0) };
-    if flags == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    let ret = unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos"))]
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
-    use libc::{fcntl, F_SETFL, O_NONBLOCK};
-
-    let ret = unsafe { fcntl(fd, F_SETFL, O_NONBLOCK) };
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos"))]
-fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
-    let mut pipefd = [0; 2];
-    let ret = unsafe { libc::pipe(pipefd.as_mut_ptr()) };
-
-    if ret == -1 {
-        return Err(io::Error::last_os_error());
-    }
-
-    for fd in &pipefd {
-        set_cloexec(*fd)?;
-        set_nonblocking(*fd)?;
-    }
-    Ok((pipefd[0], pipefd[1]))
 }
 
 /// The result of a future, handed over from a Tokio thread to the PHP thread.
@@ -132,9 +76,8 @@ pub struct EventLoop {
     sender: Sender<u64>,
     receiver: Receiver<u64>,
 
-    /// One write end shared by every future, instead of a descriptor duplicated for each.
-    notify_sender: Arc<File>,
-    notify_receiver: File,
+    /// Wakes PHP up when futures complete: shared by every future.
+    notifier: Arc<Notifier>,
 
     get_current_suspension: Function,
 }
@@ -151,7 +94,7 @@ impl EventLoop {
                     "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
                 );
             }
-            Ok(event_loop.notify_receiver.as_raw_fd() as u64)
+            Ok(event_loop.notifier.php_fd())
         })
     }
 
@@ -194,20 +137,13 @@ impl EventLoop {
             c.suspensions.insert(id, suspension.shallow_clone());
 
             let sender = c.sender.clone();
-            let notifier = c.notify_sender.clone();
+            let notifier = c.notifier.clone();
             let result = slot.clone();
             RUNTIME.spawn(async move {
                 result.set(future.await);
                 // Only the ID crosses threads, never a PHP value.
                 let _ = sender.send(id);
-                let mut notifier = &*notifier;
-                loop {
-                    match notifier.write(&[0]) {
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                        // A full pipe (EAGAIN) already has a wakeup pending.
-                        _ => break,
-                    }
-                }
+                notifier.notify();
             });
             (id, suspension)
         });
@@ -237,8 +173,7 @@ impl EventLoop {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
-            let mut buffer = [0; 4096];
-            while c.notify_receiver.read(&mut buffer).is_ok_and(|n| n != 0) {}
+            c.notifier.drain();
             Ok(c.receiver
                 .try_iter()
                 .filter_map(|id| c.suspensions.remove(&id))
@@ -274,8 +209,7 @@ impl EventLoop {
 
     pub fn new() -> PhpResult<Self> {
         let (sender, receiver) = channel();
-        let (notify_receiver, notify_sender) =
-            sys_pipe().map_err(|err| format!("Could not create pipe: {}", err))?;
+        let notifier = Notifier::new().map_err(|err| format!("Could not create pipe: {}", err))?;
 
         if !call_user_func!(
             Function::try_from_function("class_exists").unwrap(),
@@ -302,8 +236,7 @@ impl EventLoop {
             next: 0,
             sender,
             receiver,
-            notify_sender: Arc::new(unsafe { File::from_raw_fd(notify_sender) }),
-            notify_receiver: unsafe { File::from_raw_fd(notify_receiver) },
+            notifier: Arc::new(notifier),
             get_current_suspension: Function::try_from_method(
                 "\\Revolt\\EventLoop",
                 "getSuspension",
