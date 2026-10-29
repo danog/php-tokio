@@ -12,17 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::borrow_unchecked::borrow_unchecked;
-use ext_php_rs::types::Zval;
-use ext_php_rs::{call_user_func, prelude::*, zend::Function};
+use ext_php_rs::{
+    call_user_func,
+    convert::IntoZval,
+    exception::throw_object,
+    prelude::*,
+    types::Zval,
+    zend::{ExecutorGlobals, Function},
+};
 use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
+    collections::HashMap,
     fs::File,
     future::Future,
     io::{self, Read, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Condvar, Mutex,
+    },
 };
 use tokio::runtime::Runtime;
 
@@ -31,7 +40,7 @@ lazy_static! {
 }
 
 thread_local! {
-    static EVENTLOOP: RefCell<Option<EventLoop>> = RefCell::new(None);
+    static EVENTLOOP: RefCell<Option<EventLoop>> = const { RefCell::new(None) };
 }
 
 #[cfg(any(target_os = "linux", target_os = "solaris"))]
@@ -88,40 +97,61 @@ fn sys_pipe() -> io::Result<(RawFd, RawFd)> {
     Ok((pipefd[0], pipefd[1]))
 }
 
-pub struct EventLoop {
-    sender: Sender<Suspension>,
-    receiver: Receiver<Suspension>,
+/// The result of a future, handed over from a Tokio thread to the PHP thread.
+struct Slot<T> {
+    value: Mutex<Option<T>>,
+    ready: Condvar,
+}
 
-    notify_sender: File,
+impl<T> Slot<T> {
+    fn set(&self, value: T) {
+        *self.value.lock().unwrap() = Some(value);
+        self.ready.notify_all();
+    }
+
+    /// Blocks until the future completes.
+    fn wait(&self) -> T {
+        let mut value = self.value.lock().unwrap();
+        loop {
+            if let Some(value) = value.take() {
+                return value;
+            }
+            value = self.ready.wait(value).unwrap();
+        }
+    }
+}
+
+pub struct EventLoop {
+    /// The process that initialized the event loop: Tokio's threads don't survive a fork.
+    pid: u32,
+
+    /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
+    /// PHP thread: only the IDs of the completed futures cross threads.
+    suspensions: HashMap<u64, Zval>,
+    next: u64,
+    sender: Sender<u64>,
+    receiver: Receiver<u64>,
+
+    /// One write end shared by every future, instead of a descriptor duplicated for each.
+    notify_sender: Arc<File>,
     notify_receiver: File,
 
     get_current_suspension: Function,
-
-    dummy: [u8; 1],
 }
-
-/// # Safety
-///
-/// `Suspension` contains a PHP `Zval`, but it is never accessed from Tokio threads.
-/// The value is only moved across threads and sent back through a channel.
-/// All interaction with the inner `Zval` (e.g. calling `resume()`) happens
-/// exclusively on the original PHP thread in `EventLoop::wakeup()`.
-///
-/// Therefore, no PHP memory is accessed off-thread, making `Send` and `Sync` sound
-/// under this invariant.
-struct Suspension(Zval);
-unsafe impl Send for Suspension {}
-unsafe impl Sync for Suspension {}
 
 impl EventLoop {
     pub fn init() -> PhpResult<u64> {
         EVENTLOOP.with_borrow_mut(|e| {
-            Ok(match e {
+            let event_loop = match e {
                 None => e.insert(Self::new()?),
-                Some(ev) => ev,
+                Some(event_loop) => event_loop,
+            };
+            if event_loop.pid != std::process::id() {
+                return Err(
+                    "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
+                );
             }
-            .notify_receiver
-            .as_raw_fd() as u64)
+            Ok(event_loop.notify_receiver.as_raw_fd() as u64)
         })
     }
 
@@ -141,54 +171,105 @@ impl EventLoop {
         // Once the result of the Future is ready, tokio doesn't need it anymore,
         // the suspend_on function is resumed, and we safely drop the Future upon exiting.
         //
-        let (future, get_current_suspension) = EVENTLOOP.with_borrow_mut(move |c| {
-            let c = c.as_mut().unwrap();
-            let suspension = Suspension(call_user_func!(c.get_current_suspension).unwrap());
+        // This only holds if suspend_on never returns (or unwinds) before the future has
+        // completed: nothing below may panic once the future is spawned, and if the caller
+        // is not resumed by wakeup(), we wait for the future before returning.
+        let slot = Arc::new(Slot {
+            value: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        let (id, suspension) = EVENTLOOP.with_borrow_mut(|c| {
+            let c = c
+                .as_mut()
+                .expect("php-tokio's EventLoop::init() must be called first");
+            assert_eq!(
+                c.pid,
+                std::process::id(),
+                "php-tokio cannot be used after fork: Tokio's threads are not inherited"
+            );
+            let suspension = call_user_func!(c.get_current_suspension)
+                .expect("Could not get the current suspension");
+            c.next += 1;
+            let id = c.next;
+            c.suspensions.insert(id, suspension.shallow_clone());
 
             let sender = c.sender.clone();
-            let mut notifier = c.notify_sender.try_clone().unwrap();
-
-            (
-                RUNTIME.spawn(async move {
-                    let res = future.await;
-                    sender.send(suspension).unwrap();
-                    notifier.write_all(&[0]).unwrap();
-                    res
-                }),
-                unsafe { borrow_unchecked(&c.get_current_suspension) },
-            )
+            let notifier = c.notify_sender.clone();
+            let result = slot.clone();
+            RUNTIME.spawn(async move {
+                result.set(future.await);
+                // Only the ID crosses threads, never a PHP value.
+                let _ = sender.send(id);
+                let mut notifier = &*notifier;
+                loop {
+                    match notifier.write(&[0]) {
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        // A full pipe (EAGAIN) already has a wakeup pending.
+                        _ => break,
+                    }
+                }
+            });
+            (id, suspension)
         });
 
         // We suspend the fiber here, the Rust stack is kept alive until the result is ready.
-        call_user_func!(get_current_suspension)
-            .unwrap()
-            .try_call_method("suspend", vec![])
-            .unwrap();
+        //
+        // try_call_method returns Ok even when suspend() throws (an event-loop error thrown into
+        // {main}, or the fiber being destroyed): the exception is left pending, so check for it.
+        // The caller then continues without being resumed: unregister it, and wait for the
+        // future, which may borrow from this stack; the pending exception then propagates.
+        let suspended = suspension.try_call_method("suspend", vec![]);
+        if suspended.is_err() || ExecutorGlobals::has_exception() {
+            EVENTLOOP.with_borrow_mut(|c| {
+                if let Some(c) = c.as_mut() {
+                    c.suspensions.remove(&id);
+                }
+            });
+        }
 
-        // We've resumed, the `future` is already resolved and is not used by the tokio thread, it's safe to drop it.
-
-        return RUNTIME.block_on(future).unwrap();
+        // Resumed by wakeup() once the future completed: this doesn't block.
+        slot.wait()
     }
 
+    /// Resumes the callers whose future completed.
     pub fn wakeup() -> PhpResult<()> {
-        EVENTLOOP.with_borrow_mut(|c| {
-            let c = c.as_mut().unwrap();
-
-            while let Ok(1) = c.notify_receiver.read(&mut c.dummy) {}
-
-            for mut suspesion in c.receiver.try_iter() {
-                suspesion
-                    .0
-                    .object_mut()
-                    .unwrap()
-                    .try_call_method("resume", vec![])?;
+        let ready = EVENTLOOP.with_borrow_mut(|c| -> PhpResult<Vec<Zval>> {
+            let c = c
+                .as_mut()
+                .ok_or("php-tokio's EventLoop::init() must be called first")?;
+            let mut buffer = [0; 4096];
+            while c.notify_receiver.read(&mut buffer).is_ok_and(|n| n != 0) {}
+            Ok(c.receiver
+                .try_iter()
+                .filter_map(|id| c.suspensions.remove(&id))
+                .collect())
+        })?;
+        // Resume outside the borrow: resuming can re-enter php-tokio.
+        let mut first = None;
+        for suspension in ready {
+            let _ = suspension.try_call_method("resume", vec![]);
+            // An exception thrown by resume() is left pending, and PHP calls nothing while one
+            // is: take it to resume the others, and rethrow the first one.
+            if let Some(exception) = ExecutorGlobals::take_exception() {
+                first.get_or_insert(exception);
             }
-            Ok(())
-        })
+        }
+        if let Some(exception) = first {
+            throw_object(exception.into_zval(false)?)?;
+        }
+        Ok(())
     }
 
+    /// Releases the event loop. Callers still suspended are never resumed: their suspensions are
+    /// released here, on the PHP thread.
     pub fn shutdown() {
-        EVENTLOOP.set(None)
+        let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
+        if let Some(event_loop) = event_loop {
+            if event_loop.pid != std::process::id() {
+                // Inherited across fork: the parent owns the pipe and the runtime.
+                std::mem::forget(event_loop);
+            }
+        }
     }
 
     pub fn new() -> PhpResult<Self> {
@@ -203,7 +284,7 @@ impl EventLoop {
         .bool()
         .unwrap_or(false)
         {
-            return Err(format!("\\Revolt\\EventLoop does not exist!").into());
+            return Err("\\Revolt\\EventLoop does not exist!".into());
         }
         if !call_user_func!(
             Function::try_from_function("interface_exists").unwrap(),
@@ -212,15 +293,17 @@ impl EventLoop {
         .bool()
         .unwrap_or(false)
         {
-            return Err(format!("\\Revolt\\EventLoop\\Suspension does not exist!").into());
+            return Err("\\Revolt\\EventLoop\\Suspension does not exist!".into());
         }
 
         Ok(Self {
+            pid: std::process::id(),
+            suspensions: HashMap::new(),
+            next: 0,
             sender,
             receiver,
-            notify_sender: unsafe { File::from_raw_fd(notify_sender) },
+            notify_sender: Arc::new(unsafe { File::from_raw_fd(notify_sender) }),
             notify_receiver: unsafe { File::from_raw_fd(notify_receiver) },
-            dummy: [0; 1],
             get_current_suspension: Function::try_from_method(
                 "\\Revolt\\EventLoop",
                 "getSuspension",

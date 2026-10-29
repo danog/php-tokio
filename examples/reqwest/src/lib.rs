@@ -15,6 +15,10 @@ impl Client {
     pub async fn get(url: &str) -> anyhow::Result<String> {
         Ok(reqwest::get(url).await?.text().await?)
     }
+    pub async fn sleep(ms: u64) -> u64 {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        ms
+    }
 }
 
 pub extern "C" fn request_shutdown(_type: i32, _module_number: i32) -> i32 {
