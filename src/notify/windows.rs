@@ -31,12 +31,13 @@ pub(super) fn pair() -> io::Result<(Socket, Socket)> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let writer = Socket::connect(listener.local_addr()?)?;
     let ours = writer.local_addr()?;
-    let reader = loop {
-        let (reader, peer) = listener.accept()?;
-        if peer == ours {
-            break reader;
-        }
+    // The first accepted connection that is ours (or the first error). incoming() never ends.
+    let mine = |accepted: &io::Result<Socket>| {
+        accepted
+            .as_ref()
+            .map_or(true, |s| s.peer_addr().ok() == Some(ours))
     };
+    let reader = listener.incoming().find(mine).expect("endless")?;
     // One-byte writes: don't let Nagle's algorithm hold them back.
     writer.set_nodelay(true)?;
     Ok((writer, reader))

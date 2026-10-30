@@ -242,6 +242,7 @@ mod tests {
                         m: &mut str,
                         r: &&str,
                         #[this] t: &Native,
+                        #[allow(unused)] u: &str,
                         o: Option,
                         l: Option<'a>,
                     ) {}
@@ -258,6 +259,7 @@ mod tests {
                         m: &mut str,
                         r: & &str,
                         #[this] t: &Native,
+                        #[allow(unused)] u: &str,
                         o: Option,
                         l: Option<'a>,
                     ) {
@@ -267,6 +269,7 @@ mod tests {
                         let ob = ob.and_then(|__temp| Some(unsafe { ::php_tokio::borrow_unchecked::borrow_unchecked(__temp) }));
                         let m = unsafe { ::php_tokio::borrow_unchecked::borrow_unchecked(m) };
                         let r = unsafe { ::php_tokio::borrow_unchecked::borrow_unchecked(r) };
+                        let u = unsafe { ::core::mem::transmute::<&str, &'static str>(u) };
                         ::php_tokio::EventLoop::suspend_on(async move {})
                     }
                 }

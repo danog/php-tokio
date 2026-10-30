@@ -126,6 +126,8 @@ impl Drop for Task {
 
 /// Tokio's threads don't survive a fork: only the process that initialized an event loop can use
 /// it.
+const SOCKET_ERROR: &str = "Could not create the notification socket";
+
 #[cfg(unix)]
 const PENDING_ACROSS_FORK: &str =
     "php-tokio: this call was pending when the process forked, and can only complete in the parent";
@@ -355,6 +357,7 @@ impl EventLoop {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
+            #[cfg(unix)]
             if c.check_owned().is_err() {
                 return Ok(vec![]);
             }
@@ -432,8 +435,8 @@ impl EventLoop {
 
     fn new(runtime: Option<Runtime>) -> PhpResult<Self> {
         let (completions, completed) = mpsc::channel();
-        let (notifier, receiver) = notify::channel()
-            .map_err(|err| format!("Could not create the notification socket: {}", err))?;
+        // On one line: on Windows, which can't run out of descriptors, the closure never runs.
+        let (notifier, receiver) = notify::channel().map_err(|e| format!("{SOCKET_ERROR}: {e}"))?;
 
         // Autoloaded if needed.
         for name in ["Revolt\\EventLoop", "Revolt\\EventLoop\\Suspension"] {
