@@ -127,13 +127,6 @@ impl Receiver {
         }
     }
 
-    /// The descriptor of PHP's end, for `php://fd/<fd>`.
-    #[cfg(unix)]
-    pub(crate) fn fd(&self) -> u64 {
-        use std::os::fd::AsRawFd;
-        self.reader.as_raw_fd() as u64
-    }
-
     /// PHP's end as a PHP socket stream, for `EventLoop::onReadable`: a new descriptor for the
     /// same socket, owned by the stream.
     pub(crate) fn php_stream(&self) -> PhpResult<Zval> {

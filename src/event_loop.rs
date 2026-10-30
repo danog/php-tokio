@@ -86,24 +86,10 @@ impl EventLoop {
     /// `wakeup()` when it is readable:
     ///
     /// ```php
-    /// $stream = Extension::initStream();
+    /// $stream = Extension::init();
     /// Revolt\EventLoop::onReadable($stream, fn () => Extension::wakeup());
     /// ```
-    pub fn init_stream() -> PhpResult<Zval> {
-        Self::with_initialized(|event_loop| event_loop.receiver.php_stream())
-    }
-
-    /// Initializes the event loop, returning the descriptor to open as `php://fd/<fd>` and watch
-    /// for readability. Unix only: on Windows, PHP can only watch the stream from `init_stream()`
-    /// without delays.
-    pub fn init() -> PhpResult<u64> {
-        #[cfg(unix)]
-        return Self::with_initialized(|event_loop| Ok(event_loop.receiver.fd()));
-        #[cfg(not(unix))]
-        return Err("Use php_tokio::EventLoop::init_stream() on this platform".into());
-    }
-
-    fn with_initialized<T>(f: impl FnOnce(&EventLoop) -> PhpResult<T>) -> PhpResult<T> {
+    pub fn init() -> PhpResult<Zval> {
         EVENTLOOP.with_borrow_mut(|e| {
             let event_loop = match e {
                 None => e.insert(Self::new()?),
@@ -114,7 +100,7 @@ impl EventLoop {
                     "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
                 );
             }
-            f(event_loop)
+            event_loop.receiver.php_stream()
         })
     }
 
@@ -222,13 +208,13 @@ impl EventLoop {
         let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
         if let Some(event_loop) = event_loop {
             if event_loop.pid != std::process::id() {
-                // Inherited across fork: the parent owns the pipe and the runtime.
+                // Inherited across fork: the parent owns the socket and the runtime.
                 std::mem::forget(event_loop);
             }
         }
     }
 
-    pub fn new() -> PhpResult<Self> {
+    fn new() -> PhpResult<Self> {
         let (completions, completed) = mpsc::channel();
         let (notifier, receiver) = notify::channel()
             .map_err(|err| format!("Could not create the notification socket: {}", err))?;

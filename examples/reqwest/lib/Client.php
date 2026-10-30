@@ -14,7 +14,7 @@ final class Client
             return;
         }
 
-        $stream = \Client::initStream();
+        $stream = \Client::init();
         \stream_set_blocking($stream, false);
         self::$id = EventLoop::onReadable($stream, fn () => \Client::wakeup());
     }

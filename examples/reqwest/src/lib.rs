@@ -8,8 +8,8 @@ struct Client {}
 
 #[php_async_impl]
 impl Client {
-    pub fn init_stream() -> PhpResult<Zval> {
-        EventLoop::init_stream()
+    pub fn init() -> PhpResult<Zval> {
+        EventLoop::init()
     }
     pub fn wakeup() -> PhpResult<()> {
         EventLoop::wakeup()

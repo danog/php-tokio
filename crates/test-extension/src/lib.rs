@@ -26,8 +26,8 @@ pub struct Native;
 
 #[php_async_impl]
 impl Native {
-    pub fn init_stream() -> PhpResult<Zval> {
-        EventLoop::init_stream()
+    pub fn init() -> PhpResult<Zval> {
+        EventLoop::init()
     }
 
     pub fn wakeup() -> PhpResult<()> {

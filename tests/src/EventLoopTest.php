@@ -162,7 +162,7 @@ final class EventLoopTest extends TestCase
         if ($pid === 0) {
             // Tokio's threads aren't inherited: initializing again must fail.
             try {
-                Native::initStream();
+                Native::init();
                 $code = 1;
             } catch (\Throwable $e) {
                 $code = str_contains($e->getMessage(), 'fork') ? 0 : 2;
