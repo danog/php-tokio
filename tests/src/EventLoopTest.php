@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace PhpTokio\Test;
 
+use Amp\TimeoutCancellation;
 use PHPUnit\Framework\Attributes\RequiresFunction;
-use PHPUnit\Framework\Attributes\RequiresOperatingSystemFamily;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use Revolt\EventLoop\UncaughtThrowable;
@@ -156,11 +156,31 @@ final class EventLoopTest extends TestCase
         self::assertSame(1_000, $future->await());
     }
 
+    public function testDrainCollectsTheCompletionsOfInterruptedCallers(): void
+    {
+        $suspension = null;
+        $future = async(static function () use (&$suspension): void {
+            $suspension = EventLoop::getSuspension();
+            Native::trySleep(10);
+        });
+        delay(0.01);
+        $suspension->throw(new \RuntimeException('interrupted'));
+        try {
+            $future->await();
+        } catch (\RuntimeException) {
+        }
+        // Blocking: the completion is queued before any wakeup, and nobody waits for it.
+        usleep(100_000);
+        Native::drain(0);
+        self::assertSame(0, Native::pending());
+        self::assertSame(1, Native::sleep(1));
+    }
+
     public function testTrySuspendOnReturnsTheInterruptingExceptionWithoutWaiting(): void
     {
         $exception = new \RuntimeException('interrupted');
         $suspension = null;
-        $future = async(static function () use (&$suspension): float {
+        $future = async(static function () use (&$suspension, $exception): float {
             $suspension = EventLoop::getSuspension();
             $start = hrtime(true);
             try {
@@ -169,7 +189,7 @@ final class EventLoopTest extends TestCase
             } catch (\RuntimeException $e) {
                 $elapsed = (hrtime(true) - $start) / 1e9;
                 // Unchanged: not wrapped in an exception of php-tokio's.
-                self::assertSame('interrupted', $e->getMessage());
+                self::assertSame($exception, $e);
                 return $elapsed;
             }
         });
@@ -181,6 +201,72 @@ final class EventLoopTest extends TestCase
         self::assertSame(1, Native::trySleep(1));
         delay(1.0);
         self::assertSame(2, Native::trySleep(2));
+    }
+
+    public function testInitializingAgainGivesAnotherStreamOfTheSameEventLoop(): void
+    {
+        $stream = Native::initWith();
+        try {
+            self::assertIsResource($stream);
+            // The runtime isn't built again (it would still be named php-tokio-test), and the
+            // callers suspended meanwhile are still the event loop's.
+            $future = async(Native::sleep(...), 50);
+            delay(0.01);
+            self::assertSame(1, Native::pending());
+            self::assertSame(50, $future->await());
+        } finally {
+            fclose($stream);
+        }
+    }
+
+    public function testAResumeThatThrowsDoesNotStopTheOtherResumes(): void
+    {
+        // Resumed by someone else, the first caller blocks in php-tokio until its future
+        // completes: php-tokio's own resume() then throws, as it isn't suspended any more.
+        $suspension = null;
+        $first = async(static function () use (&$suspension): int {
+            $suspension = EventLoop::getSuspension();
+            return Native::sleep(50);
+        });
+        $second = async(Native::sleep(...), 50);
+        delay(0.01);
+        $errors = [];
+        $handler = EventLoop::getErrorHandler();
+        EventLoop::setErrorHandler(static function (\Throwable $e) use (&$errors): void {
+            $errors[] = $e->getMessage();
+        });
+        try {
+            $suspension->resume();
+            self::assertSame(50, $first->await());
+            // Both futures completed while the first caller blocked: one wakeup resumes both.
+            self::assertSame(50, $second->await(new TimeoutCancellation(2)));
+            self::assertSame(['Must call suspend() before calling resume()'], $errors);
+        } finally {
+            EventLoop::setErrorHandler($handler);
+        }
+    }
+
+    public function testTheStreamIsReadableExactlyWhileACompletionIsWaiting(): void
+    {
+        self::assertFalse(Bridge::readable(), 'nothing completed');
+        self::assertSame(1, Native::sleep(1));
+        self::assertFalse(Bridge::readable(), 'wakeup() consumed the notification');
+
+        foreach ([Native::wakeup(...), static fn () => Native::drain(0)] as $consume) {
+            $future = async(Native::sleep(...), 20);
+            delay(0.005);
+            // Blocking: the future completes, and nobody consumes its notification.
+            usleep(100_000);
+            self::assertTrue(Bridge::readable(), 'the completion was notified');
+            $consume();
+            self::assertFalse(Bridge::readable(), 'the notification was consumed');
+            self::assertSame(20, $future->await());
+        }
+    }
+
+    public function testBorrowUncheckedKeepsWhatItBorrows(): void
+    {
+        self::assertSame([3, 3, 3], Native::borrowedLengths('abc'));
     }
 
     public function testWakeupWithoutCompletionsDoesNothing(): void
@@ -209,36 +295,67 @@ final class EventLoopTest extends TestCase
         self::assertSame([1, 2], self::awaitAll([async(Native::sleep(...), 1), async(Native::sleep(...), 2)]));
     }
 
-    #[RequiresOperatingSystemFamily('Linux')]
     #[RequiresFunction('pcntl_fork')]
-    public function testUseAfterForkIsRejectedOnLinux(): void
+    public function testAForkedChildCanNeitherUseNorDisturbTheEventLoop(): void
     {
-        $this->assertUseAfterForkIsRejected();
-    }
-
-    #[RequiresOperatingSystemFamily('Darwin')]
-    #[RequiresFunction('pcntl_fork')]
-    public function testUseAfterForkIsRejectedOnMacOs(): void
-    {
-        $this->assertUseAfterForkIsRejected();
-    }
-
-    private function assertUseAfterForkIsRejected(): void
-    {
+        // Pending in the parent across the fork (with try_suspend_on(): see ShutdownTest for
+        // suspend_on()).
+        $future = async(Native::trySleep(...), 200);
+        delay(0.01);
         $pid = pcntl_fork();
         if ($pid === 0) {
-            // Tokio's threads aren't inherited: initializing again must fail.
-            try {
-                Native::init();
-                $code = 1;
-            } catch (\Throwable $e) {
-                $code = str_contains($e->getMessage(), 'fork') ? 0 : 2;
-            }
-            posix_kill(getmypid(), $code === 0 ? SIGUSR1 : SIGUSR2);
-            exit($code);
+            exit(self::useAfterFork());
         }
+        // Blocks the PHP thread: the future completes meanwhile, and its notification must still
+        // be there once the child exits, although the child called wakeup() all along.
         pcntl_waitpid($pid, $status);
-        self::assertTrue(pcntl_wifsignaled($status), 'the child exited by signal');
-        self::assertSame(SIGUSR1, pcntl_wtermsig($status), 'init() was rejected in the forked child');
+        self::assertTrue(pcntl_wifexited($status), 'the child exited');
+        self::assertSame(0, pcntl_wexitstatus($status), 'the child failed check '.pcntl_wexitstatus($status));
+        self::assertSame(200, $future->await(new TimeoutCancellation(2)));
+    }
+
+    /**
+     * In a forked child, returns 0, or the number of the first check that failed. Tokio's threads
+     * aren't inherited: everything fails or does nothing.
+     */
+    private static function useAfterFork(): int
+    {
+        $rejected = static function (\Closure $call): bool {
+            try {
+                $call();
+                return false;
+            } catch (\Throwable $e) {
+                return str_contains($e->getMessage(), 'fork');
+            }
+        };
+        $start = hrtime(true);
+        $checks = [
+            static fn () => $rejected(Native::init(...)),
+            static fn () => $rejected(Native::initWith(...)),
+            static fn () => $rejected(static fn () => Native::trySleep(1)),
+            static fn () => $rejected(static fn () => Native::sleep(1)),
+            // The parent's caller is pending there, not here.
+            static fn () => Native::pending() === 0,
+            static function () use (&$start): bool {
+                $start = hrtime(true);
+                Native::drain(1_000);
+                return (hrtime(true) - $start) / 1e9 < 0.5;
+            },
+            // The notification of the parent's future (due within 200 ms) stays in the shared socket.
+            static function (): bool {
+                $start = hrtime(true);
+                while ((hrtime(true) - $start) / 1e9 < 0.4) {
+                    Native::wakeup();
+                    usleep(1_000);
+                }
+                return true;
+            },
+        ];
+        foreach ($checks as $i => $check) {
+            if (!$check()) {
+                return $i + 1;
+            }
+        }
+        return 0;
     }
 }

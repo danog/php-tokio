@@ -16,12 +16,19 @@
 
 #![cfg_attr(windows, feature(abi_vectorcall))]
 
-use ext_php_rs::{prelude::*, types::Zval};
-use php_tokio::{php_async_impl, EventLoop};
-use std::time::Duration;
+use ext_php_rs::{binary_slice::BinarySlice, prelude::*, types::Zval};
+use php_tokio::{borrow_unchecked::borrow_unchecked, php_async_impl, EventLoop};
+use std::{
+    io,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 /// The name of the threads of the runtime from `initWith()`.
 const THREAD_NAME: &str = "php-tokio-test";
+
+/// The threads of the runtime from `initWith()` that stopped: they all stop once it's released.
+static STOPPED_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 #[php_class]
 #[php(name = "PhpTokio\\Test\\Native")]
@@ -39,9 +46,39 @@ impl Native {
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .thread_name(THREAD_NAME)
+                .on_thread_stop(|| {
+                    STOPPED_THREADS.fetch_add(1, Ordering::SeqCst);
+                })
                 .enable_time()
                 .build()
         })
+    }
+
+    /// Initializes the event loop with a runtime that fails to build.
+    pub fn init_with_failing_runtime() -> PhpResult<Zval> {
+        EventLoop::init_with(|| Err(io::Error::other("no runtime today")))
+    }
+
+    /// The number of threads of the runtime from `initWith()` that stopped.
+    pub fn stopped_threads() -> usize {
+        STOPPED_THREADS.load(Ordering::SeqCst)
+    }
+
+    pub fn shutdown() {
+        EventLoop::shutdown();
+    }
+
+    /// The lengths of `bytes` borrowed with every kind of borrow_unchecked().
+    pub fn borrowed_lengths(bytes: BinarySlice<u8>) -> Vec<usize> {
+        let mut owned = bytes.to_vec();
+        // SAFETY: the borrows don't outlive this call.
+        unsafe {
+            vec![
+                borrow_unchecked(&owned).len(),
+                borrow_unchecked(&mut owned).len(),
+                borrow_unchecked(bytes).len(),
+            ]
+        }
     }
 
     pub fn drain(ms: u64) -> PhpResult<()> {

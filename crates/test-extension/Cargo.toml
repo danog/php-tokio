@@ -6,7 +6,8 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+# The rlib makes cargo test build the extension for tests/phpunit.rs, which runs it.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 php-tokio = { path = "../.." }

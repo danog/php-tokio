@@ -14,12 +14,12 @@
 
 use crate::notify::{self, Notifier, Receiver};
 use ext_php_rs::{
+    boxed::ZBox,
     call_user_func,
-    convert::IntoZval,
     exception::{throw_object, PhpException},
     prelude::*,
-    types::Zval,
-    zend::{ExecutorGlobals, Function},
+    types::{ZendObject, Zval},
+    zend::{ClassEntry, ExecutorGlobals, Function},
 };
 use lazy_static::lazy_static;
 use std::{
@@ -124,8 +124,18 @@ impl Drop for Task {
     }
 }
 
+/// Tokio's threads don't survive a fork: only the process that initialized an event loop can use
+/// it.
+#[cfg(unix)]
+const PENDING_ACROSS_FORK: &str =
+    "php-tokio: this call was pending when the process forked, and can only complete in the parent";
+
+#[cfg(unix)]
+const FORKED: &str = "php-tokio cannot be used after fork: Tokio's threads are not inherited";
+
 pub struct EventLoop {
-    /// The process that initialized the event loop: Tokio's threads don't survive a fork.
+    /// The process that initialized the event loop.
+    #[cfg(unix)]
     pid: u32,
 
     /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
@@ -166,7 +176,8 @@ impl EventLoop {
     /// Initializes the event loop like `init()`, with the futures running on the runtime that
     /// `runtime` builds, for example to choose its threads:
     ///
-    /// ```
+    /// ```no_run
+    /// // In a PHP method.
     /// php_tokio::EventLoop::init_with(|| {
     ///     tokio::runtime::Builder::new_multi_thread()
     ///         .worker_threads(1)
@@ -193,11 +204,7 @@ impl EventLoop {
                 }
                 Some(event_loop) => event_loop,
             };
-            if event_loop.pid != std::process::id() {
-                return Err(
-                    "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
-                );
-            }
+            event_loop.check_owned()?;
             event_loop.receiver.php_stream()
         })
     }
@@ -230,8 +237,26 @@ impl EventLoop {
         // completed: nothing below may panic once the future is spawned, and if the caller
         // is not resumed by wakeup(), we wait for the future before returning.
         let (id, suspension, slot) = Self::spawn(future).unwrap_or_else(|err| panic!("{}", err));
-        // Interrupted, the exception stays pending for the caller.
-        let _ = Self::suspend(id, &suspension);
+        #[cfg(unix)]
+        let pid = std::process::id();
+        let interrupted = match Self::suspend(id, &suspension) {
+            Suspended::Resumed | Suspended::Failed(_) => false,
+            // Pending for the caller.
+            Suspended::Exited => true,
+            Suspended::Threw(exception) => {
+                rethrow(exception);
+                true
+            }
+        };
+        // In a process forked meanwhile (whose copy of the fiber PHP destroys), the future never
+        // completes: it runs on Tokio's threads, in the parent. Nothing here uses what it borrows,
+        // so unwind rather than wait forever: ext-php-rs throws nothing over the pending exception.
+        #[cfg(unix)]
+        if interrupted && pid != std::process::id() {
+            panic!("{}", PENDING_ACROSS_FORK);
+        }
+        #[cfg(not(unix))]
+        let _ = interrupted;
         // Resumed by wakeup() once the future completed, this doesn't block; interrupted, this
         // waits for the future.
         slot.wait()
@@ -252,13 +277,10 @@ impl EventLoop {
         match Self::suspend(id, &suspension) {
             // Resumed by wakeup() or drain() once the future completed: this doesn't block.
             Suspended::Resumed => Ok(Some(slot.wait())),
-            Suspended::Failed(err) => Err(err.into()),
-            Suspended::Interrupted if exit_pending() => Ok(None),
-            Suspended::Interrupted => {
-                let exception = ExecutorGlobals::take_exception()
-                    .ok_or("Interrupted by an exception")?
-                    .into_zval(false)?;
-                Err(PhpException::from("Interrupted by an exception").with_object(exception))
+            Suspended::Failed(err) => Err(format!("Could not suspend the caller: {}", err).into()),
+            Suspended::Exited => Ok(None),
+            Suspended::Threw(exception) => {
+                Err(PhpException::from("Interrupted by an exception").with_object(zval(exception)))
             }
         }
     }
@@ -271,13 +293,12 @@ impl EventLoop {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
-            if c.pid != std::process::id() {
-                return Err(
-                    "php-tokio cannot be used after fork: Tokio's threads are not inherited".into(),
-                );
-            }
+            c.check_owned()?;
+            // An exception thrown by getSuspension() stays pending, as the previous one.
             let suspension = call_user_func!(c.get_current_suspension)
-                .map_err(|err| format!("Could not get the current suspension: {}", err))?;
+                .ok()
+                .filter(|_| !ExecutorGlobals::has_exception())
+                .ok_or("Could not get the current suspension")?;
             c.next += 1;
             let id = c.next;
             c.suspensions.insert(id, suspension.shallow_clone());
@@ -305,8 +326,10 @@ impl EventLoop {
     fn suspend(id: u64, suspension: &Zval) -> Suspended {
         // try_call_method returns Ok even when suspend() throws: the exception is left pending.
         let suspended = suspension.try_call_method("suspend", vec![]);
-        let result = if ExecutorGlobals::has_exception() {
-            Suspended::Interrupted
+        let result = if exit_pending() {
+            Suspended::Exited
+        } else if let Some(exception) = ExecutorGlobals::take_exception() {
+            Suspended::Threw(exception)
         } else {
             match suspended {
                 Ok(_) => return Suspended::Resumed,
@@ -322,11 +345,17 @@ impl EventLoop {
     }
 
     /// Resumes the callers whose future completed.
+    ///
+    /// In a process forked from the one that initialized the event loop, does nothing: the
+    /// notification socket is shared with the parent, whose notifications must stay there.
     pub fn wakeup() -> PhpResult<()> {
         let ready = EVENTLOOP.with_borrow_mut(|c| -> PhpResult<Vec<Zval>> {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
+            if c.check_owned().is_err() {
+                return Ok(vec![]);
+            }
             c.receiver.drain();
             c.notifier.rearm();
             Ok(c.completed
@@ -346,7 +375,7 @@ impl EventLoop {
     pub fn drain(timeout: Duration) -> PhpResult<()> {
         let deadline = Instant::now() + timeout;
         let ready = EVENTLOOP.with_borrow_mut(|c| {
-            let Some(c) = c.as_mut().filter(|c| c.pid == std::process::id()) else {
+            let Some(c) = c.as_mut().filter(|c| c.check_owned().is_ok()) else {
                 return vec![];
             };
             let mut ready = vec![];
@@ -376,7 +405,7 @@ impl EventLoop {
     pub fn pending() -> usize {
         EVENTLOOP.with_borrow(|c| {
             c.as_ref()
-                .filter(|c| c.pid == std::process::id())
+                .filter(|c| c.check_owned().is_ok())
                 .map_or(0, |c| c.suspensions.len())
         })
     }
@@ -387,7 +416,8 @@ impl EventLoop {
     pub fn shutdown() {
         let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
         if let Some(mut event_loop) = event_loop {
-            if event_loop.pid != std::process::id() {
+            #[cfg(unix)]
+            if event_loop.check_owned().is_err() {
                 // Inherited across fork: the parent owns the socket and the runtime.
                 std::mem::forget(event_loop);
                 return;
@@ -403,26 +433,15 @@ impl EventLoop {
         let (notifier, receiver) = notify::channel()
             .map_err(|err| format!("Could not create the notification socket: {}", err))?;
 
-        if !call_user_func!(
-            Function::try_from_function("class_exists").unwrap(),
-            "\\Revolt\\EventLoop"
-        )?
-        .bool()
-        .unwrap_or(false)
-        {
-            return Err("\\Revolt\\EventLoop does not exist!".into());
-        }
-        if !call_user_func!(
-            Function::try_from_function("interface_exists").unwrap(),
-            "\\Revolt\\EventLoop\\Suspension"
-        )?
-        .bool()
-        .unwrap_or(false)
-        {
-            return Err("\\Revolt\\EventLoop\\Suspension does not exist!".into());
+        // Autoloaded if needed.
+        for name in ["Revolt\\EventLoop", "Revolt\\EventLoop\\Suspension"] {
+            if ClassEntry::try_find(name).is_none() {
+                return Err(format!("\\{} does not exist", name).into());
+            }
         }
 
         Ok(Self {
+            #[cfg(unix)]
             pid: std::process::id(),
             suspensions: HashMap::new(),
             next: 0,
@@ -444,14 +463,48 @@ impl EventLoop {
     }
 }
 
+impl EventLoop {
+    /// Fails in a process forked from the one that initialized the event loop.
+    #[cfg(unix)]
+    fn check_owned(&self) -> Result<(), &'static str> {
+        if self.pid == std::process::id() {
+            Ok(())
+        } else {
+            Err(FORKED)
+        }
+    }
+
+    /// Windows has no fork.
+    #[cfg(not(unix))]
+    fn check_owned(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+}
+
 /// How a caller's suspension ended.
 enum Suspended {
     /// By wakeup() or drain(), once its future completed.
     Resumed,
-    /// By an exception, left pending.
-    Interrupted,
+    /// By an exit, left pending (see exit_pending()).
+    Exited,
+    /// By an exception, taken.
+    Threw(ZBox<ZendObject>),
     /// Without suspending.
     Failed(ext_php_rs::error::Error),
+}
+
+/// `object` as a zval, holding its reference.
+fn zval(mut object: ZBox<ZendObject>) -> Zval {
+    let mut zval = Zval::new();
+    // Adds a reference: dropping the box releases its own.
+    zval.set_object(&mut object);
+    zval
+}
+
+/// Throws an exception taken with take_exception() again.
+fn rethrow(exception: ZBox<ZendObject>) {
+    // Fails only for a zval that isn't an object.
+    let _ = throw_object(zval(exception));
 }
 
 extern "C" {
@@ -480,7 +533,7 @@ fn resume(ready: Vec<Zval>) -> PhpResult<()> {
         }
     }
     if let Some(exception) = first {
-        throw_object(exception.into_zval(false)?)?;
+        rethrow(exception);
     }
     Ok(())
 }

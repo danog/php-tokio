@@ -27,9 +27,14 @@ use std::{
 };
 
 #[cfg(unix)]
-type Socket = std::os::unix::net::UnixStream;
+mod unix;
+#[cfg(unix)]
+use unix as sys;
 #[cfg(windows)]
-type Socket = std::net::TcpStream;
+mod windows;
+use sys::{into_php_socket, pair, PhpSocket, Socket};
+#[cfg(windows)]
+use windows as sys;
 
 /// Written from any thread.
 pub(crate) struct Notifier {
@@ -58,44 +63,15 @@ pub(crate) fn channel() -> io::Result<(Notifier, Receiver)> {
     ))
 }
 
-#[cfg(unix)]
-fn pair() -> io::Result<(Socket, Socket)> {
-    Socket::pair()
-}
-
-/// Windows has no socketpair(): connect two TCP sockets on the loopback interface, as PHP's and
-/// Python's socketpair() emulations do. Only the connection from our own socket is accepted.
-#[cfg(windows)]
-fn pair() -> io::Result<(Socket, Socket)> {
-    use std::net::{Ipv4Addr, TcpListener};
-
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
-    let writer = Socket::connect(listener.local_addr()?)?;
-    let ours = writer.local_addr()?;
-    let reader = loop {
-        let (reader, peer) = listener.accept()?;
-        if peer == ours {
-            break reader;
-        }
-    };
-    // One-byte writes: don't let Nagle's algorithm hold them back.
-    writer.set_nodelay(true)?;
-    Ok((writer, reader))
-}
-
 impl Notifier {
     /// Wakes PHP up: called by any thread, once the completion is published.
     pub(crate) fn notify(&self) {
         if self.pending.swap(true, Ordering::SeqCst) {
             return;
         }
-        let mut writer = &self.writer;
-        loop {
-            match writer.write(&[0]) {
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                _ => break,
-            }
-        }
+        // Non-blocking, so never interrupted by a signal (EINTR), nor full (see `pending`): it
+        // only fails once PHP's end is closed, and then nobody is waiting.
+        let _ = (&self.writer).write(&[0]);
     }
 
     /// Re-arms the notification: called on the PHP thread after draining the receiver, and
@@ -116,33 +92,16 @@ impl Receiver {
     /// Consumes the notifications in PHP's end.
     pub(crate) fn drain(&self) {
         let mut buffer = [0; 64];
-        let mut reader = &self.reader;
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(n) if n > 0 => continue,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                // Empty (WouldBlock), or closed.
-                _ => break,
-            }
-        }
+        // Until empty (WouldBlock): non-blocking, so never interrupted by a signal (EINTR).
+        while matches!((&self.reader).read(&mut buffer), Ok(n) if n > 0) {}
     }
 
     /// PHP's end as a PHP socket stream, for `EventLoop::onReadable`: a new descriptor for the
     /// same socket, owned by the stream.
     pub(crate) fn php_stream(&self) -> PhpResult<Zval> {
         let socket = into_php_socket(self.reader.try_clone().map_err(|e| e.to_string())?);
-        let stream = unsafe {
-            if ext_php_rs::PHP_DEBUG {
-                let file = c"php-tokio".as_ptr();
-                _php_stream_sock_open_from_socket_debug(socket, std::ptr::null(), file, 0, file, 0)
-            } else {
-                _php_stream_sock_open_from_socket(socket, std::ptr::null())
-            }
-        };
-        if stream.is_null() {
-            close_php_socket(socket);
-            return Err("Could not open the notification socket as a PHP stream".into());
-        }
+        // Never null: PHP's allocator bails out instead of failing.
+        let stream = unsafe { sock_open_from_socket(socket) };
         // php_stream_to_zval(): the zval takes over the stream's reference.
         let mut zval = Zval::new();
         unsafe {
@@ -153,41 +112,18 @@ impl Receiver {
     }
 }
 
-#[cfg(unix)]
-type PhpSocket = std::ffi::c_int;
-#[cfg(windows)]
-type PhpSocket = usize;
-
-#[cfg(unix)]
-fn into_php_socket(socket: Socket) -> PhpSocket {
-    std::os::fd::IntoRawFd::into_raw_fd(socket)
-}
-#[cfg(windows)]
-fn into_php_socket(socket: Socket) -> PhpSocket {
-    std::os::windows::io::IntoRawSocket::into_raw_socket(socket) as PhpSocket
-}
-
-#[cfg(unix)]
-fn close_php_socket(socket: PhpSocket) {
-    drop(unsafe { <Socket as std::os::fd::FromRawFd>::from_raw_fd(socket) });
-}
-#[cfg(windows)]
-fn close_php_socket(socket: PhpSocket) {
-    drop(unsafe { <Socket as std::os::windows::io::FromRawSocket>::from_raw_socket(socket as _) });
-}
-
 // PHPAPI php_stream *_php_stream_sock_open_from_socket(php_socket_t socket,
 //     const char *persistent_id STREAMS_DC), from main/php_network.h: STREAMS_DC adds the
-// caller's file and line, twice, in debug builds of PHP.
-#[allow(clashing_extern_declarations)]
+// caller's file and line, twice, in debug builds of PHP (cfg php_debug, from build.rs).
 extern "C" {
+    #[cfg(not(php_debug))]
     fn _php_stream_sock_open_from_socket(
         socket: PhpSocket,
         persistent_id: *const std::ffi::c_char,
     ) -> *mut ffi::php_stream;
 
-    #[link_name = "_php_stream_sock_open_from_socket"]
-    fn _php_stream_sock_open_from_socket_debug(
+    #[cfg(php_debug)]
+    fn _php_stream_sock_open_from_socket(
         socket: PhpSocket,
         persistent_id: *const std::ffi::c_char,
         file: *const std::ffi::c_char,
@@ -195,4 +131,17 @@ extern "C" {
         orig_file: *const std::ffi::c_char,
         orig_line: u32,
     ) -> *mut ffi::php_stream;
+}
+
+/// php_stream_sock_open_from_socket(socket, NULL).
+#[cfg(not(php_debug))]
+unsafe fn sock_open_from_socket(socket: PhpSocket) -> *mut ffi::php_stream {
+    _php_stream_sock_open_from_socket(socket, std::ptr::null())
+}
+
+/// php_stream_sock_open_from_socket(socket, NULL).
+#[cfg(php_debug)]
+unsafe fn sock_open_from_socket(socket: PhpSocket) -> *mut ffi::php_stream {
+    let file = c"php-tokio".as_ptr();
+    _php_stream_sock_open_from_socket(socket, std::ptr::null(), file, 0, file, 0)
 }

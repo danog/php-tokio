@@ -68,3 +68,86 @@ jobs:
           esac
           # ShutdownTest starts PHP processes of its own with the extension.
           PHP_TOKIO_TEST_EXTENSION="$extension" php -d "extension=$extension" vendor/bin/phpunit
+
+  coverage:
+    # Every line and function of php-tokio's Rust code covered: tests/coverage.sh fails otherwise.
+    name: coverage, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          coverage: none
+          tools: composer
+          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ runner.os == 'Windows' && 'nightly' || 'stable' }}
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Install the test suite's dependencies
+        working-directory: tests
+        run: composer install --no-interaction --no-progress
+
+      - run: tests/coverage.sh
+
+  mutants:
+    # Every mutant of php-tokio's Rust code caught by the tests: cargo mutants fails otherwise.
+    # Windows-only code is only compiled, so mutated, on Windows.
+    name: mutation testing, ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            mutants: --exclude src/notify/windows.rs
+          - os: windows-latest
+            mutants: --file src/notify/windows.rs
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          coverage: none
+          tools: composer
+          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ runner.os == 'Windows' && 'nightly' || 'stable' }}
+      - uses: taiki-e/install-action@cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+
+      - name: Install the test suite's dependencies
+        working-directory: tests
+        run: composer install --no-interaction --no-progress
+
+      - name: Test the mutants
+        run: PHP_TOKIO_TESTS="$PWD/tests" cargo mutants --jobs 2 --timeout 300 ${{ matrix.mutants }}
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: mutants.out-${{ matrix.os }}
+          path: mutants.out
