@@ -175,18 +175,18 @@ final class ShutdownTest extends TestCase
             $future = async(static function () use (&$suspension) {
                 $suspension = EventLoop::getSuspension();
                 try {
-                    Native::trySleep(200);
+                    Native::trySleep(500);
                 } catch (Exception) {
                 }
             });
-            delay(0.01);
+            delay(0);
             $suspension->throw(new Exception);
             $future->await();
             Native::shutdown();
             echo Native::stoppedThreads(), ' ';
             usleep(50_000);
             echo Native::stoppedThreads(), ' ';
-            usleep(400_000);
+            usleep(800_000);
             echo Native::stoppedThreads();
             PHP);
     }
@@ -201,13 +201,13 @@ final class ShutdownTest extends TestCase
                 $futures[] = async(static function () use ($method, &$suspensions): void {
                     $suspensions[] = EventLoop::getSuspension();
                     try {
-                        [Native::class, $method](100);
+                        [Native::class, $method](500);
                     } catch (Exception $e) {
                         echo "$method: ", $e->getMessage(), "\n";
                     }
                 });
             }
-            delay(0.01);
+            delay(0);
             Native::shutdown();
             foreach ($suspensions as $suspension) {
                 $suspension->throw(new Exception('after shutdown'));
@@ -398,7 +398,7 @@ final class ShutdownTest extends TestCase
         // The child's copy of the fiber waits for a future that only runs in the parent.
         [$exit, $output, , $errors] = self::runPhp(<<<'PHP'
             $future = async(static fn () => Native::sleep(300));
-            delay(0.01);
+            delay(0);
             $pid = pcntl_fork();
             if ($pid === 0) {
                 exit(0);

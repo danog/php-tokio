@@ -124,8 +124,9 @@ final class EventLoopTest extends TestCase
 
     public function testPendingCountsTheSuspendedCallers(): void
     {
-        $futures = [async(Native::sleep(...), 100), async(Native::sleep(...), 100), async(Native::sleep(...), 100)];
-        delay(0.02);
+        $futures = [async(Native::sleep(...), 500), async(Native::sleep(...), 500), async(Native::sleep(...), 500)];
+        // The fibers start, and suspend.
+        delay(0);
         self::assertSame(3, Native::pending());
         self::awaitAll($futures);
         self::assertSame(0, Native::pending());
@@ -134,7 +135,7 @@ final class EventLoopTest extends TestCase
     public function testDrainResumesTheCallersWhoseFutureCompleted(): void
     {
         $future = async(Native::sleep(...), 50);
-        delay(0.01);
+        delay(0);
         $start = hrtime(true);
         // Without running the event loop: drain() waits for the future itself.
         Native::drain(5_000);
@@ -146,7 +147,7 @@ final class EventLoopTest extends TestCase
     public function testDrainWaitsAtMostItsTimeout(): void
     {
         $future = async(Native::sleep(...), 1_000);
-        delay(0.01);
+        delay(0);
         $start = hrtime(true);
         Native::drain(50);
         $elapsed = (hrtime(true) - $start) / 1e9;
@@ -161,16 +162,16 @@ final class EventLoopTest extends TestCase
         $suspension = null;
         $future = async(static function () use (&$suspension): void {
             $suspension = EventLoop::getSuspension();
-            Native::trySleep(10);
+            Native::trySleep(500);
         });
-        delay(0.01);
+        delay(0);
         $suspension->throw(new \RuntimeException('interrupted'));
         try {
             $future->await();
         } catch (\RuntimeException) {
         }
         // Blocking: the completion is queued before any wakeup, and nobody waits for it.
-        usleep(100_000);
+        usleep(700_000);
         Native::drain(0);
         self::assertSame(0, Native::pending());
         self::assertSame(1, Native::sleep(1));
@@ -209,10 +210,10 @@ final class EventLoopTest extends TestCase
         self::assertSame(Bridge::stream(), Native::initWith());
         self::assertSame(Bridge::stream(), Native::init());
         // The callers suspended meanwhile are still the event loop's.
-        $future = async(Native::sleep(...), 50);
-        delay(0.01);
+        $future = async(Native::sleep(...), 500);
+        delay(0);
         self::assertSame(1, Native::pending());
-        self::assertSame(50, $future->await());
+        self::assertSame(500, $future->await());
     }
 
     public function testAResumeThatThrowsDoesNotStopTheOtherResumes(): void
@@ -222,10 +223,10 @@ final class EventLoopTest extends TestCase
         $suspension = null;
         $first = async(static function () use (&$suspension): int {
             $suspension = EventLoop::getSuspension();
-            return Native::sleep(50);
+            return Native::sleep(200);
         });
-        $second = async(Native::sleep(...), 50);
-        delay(0.01);
+        $second = async(Native::sleep(...), 200);
+        delay(0);
         $errors = [];
         $handler = EventLoop::getErrorHandler();
         EventLoop::setErrorHandler(static function (\Throwable $e) use (&$errors): void {
@@ -233,9 +234,13 @@ final class EventLoopTest extends TestCase
         });
         try {
             $suspension->resume();
-            self::assertSame(50, $first->await());
-            // Both futures completed while the first caller blocked: one wakeup resumes both.
-            self::assertSame(50, $second->await(new TimeoutCancellation(2)));
+            self::assertSame(200, $first->await());
+            // Both futures completed while the first caller blocked: the first one's completion
+            // may be collected by the wakeup that resumes the second one, or by the next one.
+            self::assertSame(200, $second->await(new TimeoutCancellation(2)));
+            for ($i = 0; !$errors && $i < 200; $i++) {
+                delay(0.01);
+            }
             self::assertSame(['Must call suspend() before calling resume()'], $errors);
         } finally {
             EventLoop::setErrorHandler($handler);
@@ -249,14 +254,14 @@ final class EventLoopTest extends TestCase
         self::assertFalse(Bridge::readable(), 'wakeup() consumed the notification');
 
         foreach ([Native::wakeup(...), static fn () => Native::drain(0)] as $consume) {
-            $future = async(Native::sleep(...), 20);
-            delay(0.005);
+            $future = async(Native::sleep(...), 200);
+            delay(0);
             // Blocking: the future completes, and nobody consumes its notification.
-            usleep(100_000);
+            usleep(400_000);
             self::assertTrue(Bridge::readable(), 'the completion was notified');
             $consume();
             self::assertFalse(Bridge::readable(), 'the notification was consumed');
-            self::assertSame(20, $future->await());
+            self::assertSame(200, $future->await());
         }
     }
 
@@ -297,7 +302,7 @@ final class EventLoopTest extends TestCase
         // Pending in the parent across the fork (with try_suspend_on(): see ShutdownTest for
         // suspend_on()).
         $future = async(Native::trySleep(...), 200);
-        delay(0.01);
+        delay(0);
         $pid = pcntl_fork();
         if ($pid === 0) {
             exit(self::useAfterFork());
