@@ -18,7 +18,9 @@ final class Bridge
         if (self::$watcher !== null) {
             return;
         }
-        $stream = Native::init();
+        // A runtime of the event loop's own (one worker, named php-tokio-test): Subprocess
+        // covers the shared one of init().
+        $stream = Native::initWith();
         stream_set_blocking($stream, false);
         self::$watcher = EventLoop::onReadable($stream, static fn () => Native::wakeup());
     }

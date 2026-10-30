@@ -11,6 +11,7 @@ use Revolt\EventLoop;
 use Revolt\EventLoop\UncaughtThrowable;
 
 use function Amp\async;
+use function Amp\delay;
 use function Amp\Future\await;
 
 final class EventLoopTest extends TestCase
@@ -114,6 +115,72 @@ final class EventLoopTest extends TestCase
         }
         EventLoop::queue(static fn () => usleep(500_000));
         self::assertSame(array_fill(0, $count, 50), self::awaitAll($futures));
+    }
+
+    public function testFuturesRunOnTheRuntimeFromInitWith(): void
+    {
+        self::assertStringStartsWith('php-tokio-test', Native::threadName());
+    }
+
+    public function testPendingCountsTheSuspendedCallers(): void
+    {
+        $futures = [async(Native::sleep(...), 100), async(Native::sleep(...), 100), async(Native::sleep(...), 100)];
+        delay(0.02);
+        self::assertSame(3, Native::pending());
+        self::awaitAll($futures);
+        self::assertSame(0, Native::pending());
+    }
+
+    public function testDrainResumesTheCallersWhoseFutureCompleted(): void
+    {
+        $future = async(Native::sleep(...), 50);
+        delay(0.01);
+        $start = hrtime(true);
+        // Without running the event loop: drain() waits for the future itself.
+        Native::drain(5_000);
+        self::assertLessThan(1.0, (hrtime(true) - $start) / 1e9, 'drain() returned once the future completed');
+        self::assertSame(0, Native::pending());
+        self::assertSame(50, $future->await());
+    }
+
+    public function testDrainWaitsAtMostItsTimeout(): void
+    {
+        $future = async(Native::sleep(...), 1_000);
+        delay(0.01);
+        $start = hrtime(true);
+        Native::drain(50);
+        $elapsed = (hrtime(true) - $start) / 1e9;
+        self::assertGreaterThanOrEqual(0.05, $elapsed);
+        self::assertLessThan(0.5, $elapsed);
+        self::assertSame(1, Native::pending());
+        self::assertSame(1_000, $future->await());
+    }
+
+    public function testTrySuspendOnReturnsTheInterruptingExceptionWithoutWaiting(): void
+    {
+        $exception = new \RuntimeException('interrupted');
+        $suspension = null;
+        $future = async(static function () use (&$suspension): float {
+            $suspension = EventLoop::getSuspension();
+            $start = hrtime(true);
+            try {
+                Native::trySleep(1_000);
+                self::fail('No exception thrown');
+            } catch (\RuntimeException $e) {
+                $elapsed = (hrtime(true) - $start) / 1e9;
+                // Unchanged: not wrapped in an exception of php-tokio's.
+                self::assertSame('interrupted', $e->getMessage());
+                return $elapsed;
+            }
+        });
+        delay(0.05);
+        $suspension->throw($exception);
+        self::assertLessThan(0.5, $future->await(), 'try_suspend_on() did not wait for the future');
+        self::assertSame(0, Native::pending());
+        // The detached future completes later, and resumes nobody.
+        self::assertSame(1, Native::trySleep(1));
+        delay(1.0);
+        self::assertSame(2, Native::trySleep(2));
     }
 
     public function testWakeupWithoutCompletionsDoesNothing(): void

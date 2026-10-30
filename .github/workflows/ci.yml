@@ -66,4 +66,5 @@ jobs:
             macOS) extension=../target/release/libphp_tokio_test_extension.dylib ;;
             Windows) extension=../target/release/php_tokio_test_extension.dll ;;
           esac
-          php -d "extension=$extension" vendor/bin/phpunit
+          # ShutdownTest starts PHP processes of its own with the extension.
+          PHP_TOKIO_TEST_EXTENSION="$extension" php -d "extension=$extension" vendor/bin/phpunit

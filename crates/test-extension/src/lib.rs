@@ -20,6 +20,9 @@ use ext_php_rs::{prelude::*, types::Zval};
 use php_tokio::{php_async_impl, EventLoop};
 use std::time::Duration;
 
+/// The name of the threads of the runtime from `initWith()`.
+const THREAD_NAME: &str = "php-tokio-test";
+
 #[php_class]
 #[php(name = "PhpTokio\\Test\\Native")]
 pub struct Native;
@@ -28,6 +31,38 @@ pub struct Native;
 impl Native {
     pub fn init() -> PhpResult<Zval> {
         EventLoop::init()
+    }
+
+    /// Initializes the event loop with a runtime of its own: one worker, named THREAD_NAME.
+    pub fn init_with() -> PhpResult<Zval> {
+        EventLoop::init_with(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name(THREAD_NAME)
+                .enable_time()
+                .build()
+        })
+    }
+
+    pub fn drain(ms: u64) -> PhpResult<()> {
+        EventLoop::drain(Duration::from_millis(ms))
+    }
+
+    pub fn pending() -> usize {
+        EventLoop::pending()
+    }
+
+    /// Like `sleep()`, through `try_suspend_on()`: null if an exit interrupted it.
+    pub fn try_sleep(ms: u64) -> PhpResult<Option<u64>> {
+        EventLoop::try_suspend_on(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            ms
+        })
+    }
+
+    /// The name of the thread the futures run on.
+    pub async fn thread_name() -> String {
+        std::thread::current().name().unwrap_or_default().to_owned()
     }
 
     pub fn wakeup() -> PhpResult<()> {
