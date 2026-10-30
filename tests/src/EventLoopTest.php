@@ -203,20 +203,16 @@ final class EventLoopTest extends TestCase
         self::assertSame(2, Native::trySleep(2));
     }
 
-    public function testInitializingAgainGivesAnotherStreamOfTheSameEventLoop(): void
+    public function testInitializingAgainGivesTheSameStream(): void
     {
-        $stream = Native::initWith();
-        try {
-            self::assertIsResource($stream);
-            // The runtime isn't built again (it would still be named php-tokio-test), and the
-            // callers suspended meanwhile are still the event loop's.
-            $future = async(Native::sleep(...), 50);
-            delay(0.01);
-            self::assertSame(1, Native::pending());
-            self::assertSame(50, $future->await());
-        } finally {
-            fclose($stream);
-        }
+        // Not to be closed (see ShutdownTest), so not a new one.
+        self::assertSame(Bridge::stream(), Native::initWith());
+        self::assertSame(Bridge::stream(), Native::init());
+        // The callers suspended meanwhile are still the event loop's.
+        $future = async(Native::sleep(...), 50);
+        delay(0.01);
+        self::assertSame(1, Native::pending());
+        self::assertSame(50, $future->await());
     }
 
     public function testAResumeThatThrowsDoesNotStopTheOtherResumes(): void

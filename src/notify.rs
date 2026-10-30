@@ -48,6 +48,8 @@ pub(crate) struct Notifier {
 pub(crate) struct Receiver {
     /// Rust's own handle on PHP's end, to drain it.
     reader: Socket,
+    /// PHP's end as a PHP stream, created by the first `php_stream()`.
+    stream: Option<Zval>,
 }
 
 pub(crate) fn channel() -> io::Result<(Notifier, Receiver)> {
@@ -59,7 +61,10 @@ pub(crate) fn channel() -> io::Result<(Notifier, Receiver)> {
             pending: AtomicBool::new(false),
             writer,
         },
-        Receiver { reader },
+        Receiver {
+            reader,
+            stream: None,
+        },
     ))
 }
 
@@ -96,9 +101,24 @@ impl Receiver {
         while matches!((&self.reader).read(&mut buffer), Ok(n) if n > 0) {}
     }
 
-    /// PHP's end as a PHP socket stream, for `EventLoop::onReadable`: a new descriptor for the
-    /// same socket, owned by the stream.
-    pub(crate) fn php_stream(&self) -> PhpResult<Zval> {
+    /// PHP's end as a PHP socket stream, for `EventLoop::onReadable`: the same stream every
+    /// time, which must stay open until the event loop is shut down. On Windows, closing a socket
+    /// stream shuts the socket itself down for reading (not just the stream's descriptor), which
+    /// would leave PHP's end readable (at EOF) forever.
+    pub(crate) fn php_stream(&mut self) -> PhpResult<Zval> {
+        if self.stream.is_none() {
+            self.stream = Some(self.open_php_stream()?);
+        }
+        let stream = self.stream.as_ref().expect("just opened");
+        // zend_list_close() changes the type of a closed stream's resource (to -1).
+        if unsafe { (*stream.resource().expect("a resource")).type_ != php_file_le_stream() } {
+            return Err("php-tokio's notification stream was closed before shutdown()".into());
+        }
+        Ok(stream.shallow_clone())
+    }
+
+    /// A new descriptor for PHP's end, owned by a new PHP stream.
+    fn open_php_stream(&self) -> PhpResult<Zval> {
         let socket = into_php_socket(self.reader.try_clone().map_err(|e| e.to_string())?);
         // Never null: PHP's allocator bails out instead of failing.
         let stream = unsafe { sock_open_from_socket(socket) };
@@ -116,6 +136,9 @@ impl Receiver {
 //     const char *persistent_id STREAMS_DC), from main/php_network.h: STREAMS_DC adds the
 // caller's file and line, twice, in debug builds of PHP (cfg php_debug, from build.rs).
 extern "C" {
+    /// The resource type of streams.
+    fn php_file_le_stream() -> std::ffi::c_int;
+
     #[cfg(not(php_debug))]
     fn _php_stream_sock_open_from_socket(
         socket: PhpSocket,

@@ -28,6 +28,12 @@ final class Bridge
         self::$watcher = EventLoop::onReadable($stream, static fn () => Native::wakeup());
     }
 
+    /** @return resource */
+    public static function stream()
+    {
+        return self::$stream;
+    }
+
     /** Whether the notification stream is readable now. */
     public static function readable(): bool
     {

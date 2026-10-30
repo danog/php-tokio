@@ -168,7 +168,9 @@ impl EventLoop {
     /// Revolt\EventLoop::onReadable($stream, fn () => Extension::wakeup());
     /// ```
     ///
-    /// The futures run on `RUNTIME`, shared by every request.
+    /// The stream is the same every time: don't close it before `shutdown()` (on Windows, closing
+    /// a socket stream shuts the socket down). The futures run on `RUNTIME`, shared by every
+    /// request.
     pub fn init() -> PhpResult<Zval> {
         Self::initialize(|| Ok(None))
     }

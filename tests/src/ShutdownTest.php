@@ -217,6 +217,26 @@ final class ShutdownTest extends TestCase
             PHP);
     }
 
+    public function testTheStreamMustStayOpenUntilShutdown(): void
+    {
+        // After shutdown(), a new event loop has a new stream.
+        $autoload = var_export(\dirname(__DIR__).'/vendor/autoload.php', true);
+        self::assertRuns("php-tokio's notification stream was closed before shutdown()\n1\n", <<<'PHP'
+            $stream = Native::initWith();
+            fclose($stream);
+            try {
+                Native::initWith();
+            } catch (Exception $e) {
+                echo $e->getMessage(), "\n";
+            }
+            Native::shutdown();
+            $stream = Native::initWith();
+            stream_set_blocking($stream, false);
+            EventLoop::onReadable($stream, static fn () => Native::wakeup());
+            echo Native::sleep(1), "\n";
+            PHP, setup: "require $autoload;");
+    }
+
     public function testEveryEntryPointNeedsInit(): void
     {
         $autoload = var_export(\dirname(__DIR__).'/vendor/autoload.php', true);
