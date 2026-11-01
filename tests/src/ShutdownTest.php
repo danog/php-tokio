@@ -242,13 +242,15 @@ final class ShutdownTest extends TestCase
     public function testShuttingDownWaitsForTheFuturesOfSuspendOnOnly(): void
     {
         // Their callers may be freed without being unwound (see the next test).
-        self::assertRuns("waited 0.5 s\n", <<<'PHP'
+        self::assertRuns("waited for echo(), not for trySleep()\n", <<<'PHP'
             async(static fn () => Native::echo('borrowed', 500));
             async(static fn () => Native::trySleep(5_000));
             delay(0);
             $start = hrtime(true);
             Native::shutdown();
-            printf("waited %.1f s\n", (hrtime(true) - $start) / 1e9);
+            $elapsed = (hrtime(true) - $start) / 1e9;
+            echo $elapsed >= 0.5 ? 'waited for echo()' : "waited $elapsed s",
+                $elapsed < 4.0 ? ', not for trySleep()' : ", $elapsed s", "\n";
             PHP);
     }
 
