@@ -4,7 +4,7 @@ repository = "https://github.com/danog/php-tokio"
 homepage = "https://github.com/danog/php-tokio"
 license = "Apache-2.0"
 description = "Use any async Rust library from PHP!"
-version = "0.1.7"
+version = "0.2.0"
 authors = ["Daniil Gentili <daniil@daniil.it>"]
 edition = "2021"
 
@@ -12,7 +12,7 @@ edition = "2021"
 ext-php-rs = "^0.16.3"
 tokio = { version = "1.53", features = ["full"] }
 lazy_static = "1.5.0"
-php-tokio-derive = { version = "=0.2.0", path = "./crates/macros" }
+php-tokio-derive = { version = "=0.3.0", path = "./crates/macros" }
 
 [target.'cfg(windows)'.dependencies]
 socket2 = "0.6"
