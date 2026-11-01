@@ -24,9 +24,10 @@ final class ShutdownTest extends TestCase
      * the autoloaded one, in braced namespaces.
      *
      * @param list<string> $wrapper A command running the PHP command it is given.
+     * @param array<string, string> $env Environment variables to set.
      * @return array{int, string, float, string}
      */
-    private static function runPhp(string $code, string $init = 'initWith', ?string $setup = null, string $revolt = '', array $wrapper = []): array
+    private static function runPhp(string $code, string $init = 'initWith', ?string $setup = null, string $revolt = '', array $wrapper = [], array $env = []): array
     {
         $extension = getenv('PHP_TOKIO_TEST_EXTENSION');
         if ($extension === false || $extension === '') {
@@ -54,7 +55,7 @@ final class ShutdownTest extends TestCase
         $files = [tempnam(sys_get_temp_dir(), 'php-tokio-out'), tempnam(sys_get_temp_dir(), 'php-tokio-err')];
         try {
             $start = hrtime(true);
-            $process = proc_open([...$wrapper, PHP_BINARY, '-d', "extension=$extension", '-r', $script], [1 => ['file', $files[0], 'w'], 2 => ['file', $files[1], 'w']], $pipes);
+            $process = proc_open([...$wrapper, PHP_BINARY, '-d', "extension=$extension", '-r', $script], [1 => ['file', $files[0], 'w'], 2 => ['file', $files[1], 'w']], $pipes, null, $env ? [...getenv(), ...$env] : null);
             \assert(\is_resource($process));
             while (($status = proc_get_status($process))['running']) {
                 if ((hrtime(true) - $start) / 1e9 > self::TIMEOUT) {
@@ -77,10 +78,11 @@ final class ShutdownTest extends TestCase
      * the messages `$panics` (in that order).
      *
      * @param list<string> $panics
+     * @param array<string, string> $env
      */
-    private static function assertRuns(string $output, string $code, string $init = 'initWith', ?string $setup = null, string $revolt = '', array $panics = []): float
+    private static function assertRuns(string $output, string $code, string $init = 'initWith', ?string $setup = null, string $revolt = '', array $panics = [], array $env = []): float
     {
-        [$exit, $actual, $elapsed, $errors] = self::runPhp($code, $init, $setup, $revolt);
+        [$exit, $actual, $elapsed, $errors] = self::runPhp($code, $init, $setup, $revolt, env: $env);
         self::assertSame([0, $output], [$exit, $actual], $errors);
         self::assertPanics($panics, $errors);
         return $elapsed;
@@ -336,6 +338,45 @@ final class ShutdownTest extends TestCase
                 echo $e->getMessage(), ' ', Native::pending(), "\n";
             }
             PHP, setup: 'Native::init();', revolt: self::FAKE_REVOLT);
+    }
+
+    /**
+     * Runs `$code` with the temporary directory, where Windows' notification socket is bound, in
+     * a new directory of `$length` characters, deleted afterwards. The socket's file name has 26
+     * characters, and its path 107 at most.
+     */
+    private static function assertRunsWithTemporaryDirectory(int $length, string $output, string $code): void
+    {
+        $directory = sys_get_temp_dir().'\\';
+        $directory .= str_pad('php-tokio-'.bin2hex(random_bytes(4)), $length - \strlen($directory), '-');
+        mkdir($directory);
+        try {
+            self::assertRuns($output, $code, env: ['TMP' => $directory, 'TEMP' => $directory]);
+        } finally {
+            array_map(unlink(...), glob("$directory/*"));
+            rmdir($directory);
+        }
+    }
+
+    #[RequiresOperatingSystemFamily('Windows')]
+    public function testWindowsUsesAUnixSocketWhoseFileIsDeleted(): void
+    {
+        // PHP can't name AF_UNIX addresses on Windows: a TCP socket would be named 127.0.0.1:port.
+        self::assertRunsWithTemporaryDirectory(60, "false []\n1\n", <<<'PHP'
+            var_export(stream_socket_get_name($stream, false));
+            echo ' ', json_encode(glob(getenv('TMP').'/*')), "\n";
+            echo Native::sleep(1), "\n";
+            PHP);
+    }
+
+    #[RequiresOperatingSystemFamily('Windows')]
+    public function testWindowsFallsBackToLoopbackTcp(): void
+    {
+        // As on Windows before 10 1803: no Unix socket, as its path wouldn't fit in an address.
+        self::assertRunsWithTemporaryDirectory(150, "127.0.0.1\n1\n", <<<'PHP'
+            echo explode(':', stream_socket_get_name($stream, false))[0], "\n";
+            echo Native::sleep(1), "\n";
+            PHP);
     }
 
     #[RequiresOperatingSystemFamily('Linux')]
