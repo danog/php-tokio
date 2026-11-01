@@ -255,14 +255,15 @@ final class ShutdownTest extends TestCase
     public function testAFatalErrorEndsTheRequestOnceTheFuturesBorrowingFromSuspendedCallersCompleted(): void
     {
         // PHP frees the suspended fibers without unwinding them: shutdown(), at RSHUTDOWN, waits.
-        [$exit, $output, $elapsed] = self::runPhp(<<<'PHP'
+        [$exit, $output, $elapsed, $errors] = self::runPhp(<<<'PHP'
             async(static fn () => Native::echo('borrowed', 500));
             delay(0);
             ini_set('memory_limit', '16M');
             str_repeat('x', 32 << 20);
             PHP);
-        self::assertSame(255, $exit, $output);
-        self::assertStringContainsString('Allowed memory size', $output);
+        // On the standard output or error, depending on display_errors.
+        self::assertSame(255, $exit, $output.$errors);
+        self::assertStringContainsString('Allowed memory size', $output.$errors);
         self::assertGreaterThanOrEqual(0.5, $elapsed);
     }
 
