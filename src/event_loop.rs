@@ -27,7 +27,10 @@ use std::{
     collections::HashMap,
     future::Future,
     io,
-    sync::{mpsc, Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Condvar, Mutex,
+    },
     time::{Duration, Instant},
 };
 use tokio::runtime::{Handle, Runtime};
@@ -35,8 +38,20 @@ use tokio::runtime::{Handle, Runtime};
 lazy_static! {
     /// The runtime of the event loops initialized with `EventLoop::init()`, shared by every
     /// request of the process.
-    pub static ref RUNTIME: Runtime = Runtime::new().expect("Could not allocate runtime");
+    pub static ref RUNTIME: Runtime = {
+        #[cfg(unix)]
+        RUNTIME_PID.store(std::process::id().into(), Ordering::SeqCst);
+        Runtime::new().expect("Could not allocate runtime")
+    };
 }
+
+/// The process that created `RUNTIME`: its threads aren't inherited by forked children.
+#[cfg(unix)]
+static RUNTIME_PID: AtomicU64 = AtomicU64::new(0);
+
+/// The ID of the next caller, unique in the process: a caller of an event loop that was shut down
+/// can still be interrupted, and unregister itself, once a new event loop is initialized.
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     static EVENTLOOP: RefCell<Option<EventLoop>> = const { RefCell::new(None) };
@@ -44,53 +59,123 @@ thread_local! {
 
 /// The result of a future, handed over from a Tokio thread to the PHP thread.
 struct Slot<T> {
-    value: Mutex<Option<T>>,
+    state: Mutex<SlotState<T>>,
     ready: Condvar,
 }
 
+enum SlotState<T> {
+    Running,
+    Completed(T),
+    /// The future panicked (Tokio caught the panic): it has no result.
+    Panicked,
+    /// The result was taken.
+    Taken,
+}
+
+/// The message of the error of a caller whose future panicked.
+const PANICKED: &str = "php-tokio: the future panicked";
+
 impl<T> Slot<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(SlotState::Running),
+            ready: Condvar::new(),
+        }
+    }
+
     fn set(&self, value: T) {
-        *self.value.lock().unwrap() = Some(value);
+        *self.state.lock().unwrap() = SlotState::Completed(value);
         self.ready.notify_all();
     }
 
-    /// Blocks until the future completes.
-    fn wait(&self) -> T {
-        let mut value = self.value.lock().unwrap();
-        loop {
-            if let Some(value) = value.take() {
-                return value;
-            }
-            value = self.ready.wait(value).unwrap();
+    /// Called once the future is over: if it has no result, it panicked.
+    fn finish(&self) {
+        let mut state = self.state.lock().unwrap();
+        if matches!(*state, SlotState::Running) {
+            *state = SlotState::Panicked;
+        }
+        self.ready.notify_all();
+    }
+
+    /// Blocks until the future is over, returning its result, or None if it panicked.
+    fn wait(&self) -> Option<T> {
+        let mut state = self.state.lock().unwrap();
+        while matches!(*state, SlotState::Running) {
+            state = self.ready.wait(state).unwrap();
+        }
+        match std::mem::replace(&mut *state, SlotState::Taken) {
+            SlotState::Completed(value) => Some(value),
+            _ => None,
         }
     }
 }
 
-/// The futures of `suspend_on()` and `try_suspend_on()` running on a runtime that an event loop
-/// owns (`EventLoop::init_with()`), and that runtime once the event loop is shut down: it is
-/// released only when none of them runs any more.
+/// Owned by a future's task: once the future is over, completed or panicked, publishes its end
+/// and wakes PHP up. Its caller is resumed either way.
+struct Completion<T> {
+    id: u64,
+    slot: Arc<Slot<T>>,
+    completions: mpsc::Sender<u64>,
+    notifier: Arc<Notifier>,
+}
+
+impl<T> Drop for Completion<T> {
+    fn drop(&mut self) {
+        self.slot.finish();
+        // Only the ID crosses threads, never a PHP value.
+        let _ = self.completions.send(self.id);
+        self.notifier.notify();
+    }
+}
+
+/// The futures of an event loop's `suspend_on()` and `try_suspend_on()`.
 ///
-/// Dropping it earlier would cancel them, and a caller of `suspend_on()` interrupted by an
-/// exception waits for its future, which may borrow from the caller's stack, to complete.
+/// A runtime that the event loop owns (`EventLoop::init_with()`) is released once none of them
+/// runs any more: dropping it earlier would cancel them, and a caller of `suspend_on()`
+/// interrupted by an exception waits for its future, which may borrow from the caller's stack, to
+/// complete.
+///
+/// `shutdown()` waits for the futures of `suspend_on()`: after a fatal error, PHP frees the
+/// memory of the suspended callers without unwinding them.
 #[derive(Default)]
 struct Tasks {
     state: Mutex<TasksState>,
+    /// Notified when a future of `suspend_on()` ends.
+    borrowing_ended: Condvar,
 }
 
 #[derive(Default)]
 struct TasksState {
     running: usize,
+    /// The futures of `suspend_on()` among them: they may borrow from their callers.
+    borrowing: usize,
     /// The runtime to release once `running` is 0.
     release: Option<Runtime>,
 }
 
-/// Held by a running future.
-struct Task(Arc<Tasks>);
+/// Held by a running future, until it is dropped.
+struct Task {
+    tasks: Arc<Tasks>,
+    borrowing: bool,
+}
 
 impl Tasks {
-    fn start(self: &Arc<Self>) -> Task {
-        self.state.lock().unwrap().running += 1;
-        Task(self.clone())
+    fn start(self: &Arc<Self>, borrowing: bool) -> Task {
+        let mut state = self.state.lock().unwrap();
+        state.running += 1;
+        state.borrowing += usize::from(borrowing);
+        Task {
+            tasks: self.clone(),
+            borrowing,
+        }
+    }
+
+    /// Blocks until the futures of `suspend_on()` ended.
+    fn wait_borrowing(&self) {
+        let mut state = self.state.lock().unwrap();
+        while state.borrowing > 0 {
+            state = self.borrowing_ended.wait(state).unwrap();
+        }
     }
 
     /// Releases the runtime on the PHP thread if none of the futures runs, else lets the last
@@ -109,8 +194,10 @@ impl Tasks {
 impl Drop for Task {
     fn drop(&mut self) {
         let runtime = {
-            let mut state = self.0.state.lock().unwrap();
+            let mut state = self.tasks.state.lock().unwrap();
             state.running -= 1;
+            state.borrowing -= usize::from(self.borrowing);
+            self.tasks.borrowing_ended.notify_all();
             if state.running == 0 {
                 state.release.take()
             } else {
@@ -135,6 +222,10 @@ const PENDING_ACROSS_FORK: &str =
 #[cfg(unix)]
 const FORKED: &str = "php-tokio cannot be used after fork: Tokio's threads are not inherited";
 
+#[cfg(unix)]
+const FORKED_RUNTIME: &str =
+    "php-tokio: init() cannot be used after fork, as the shared runtime's threads are not inherited: use init_with()";
+
 pub struct EventLoop {
     /// The process that initialized the event loop.
     #[cfg(unix)]
@@ -143,7 +234,6 @@ pub struct EventLoop {
     /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
     /// PHP thread: only the IDs of the completed futures cross threads.
     suspensions: HashMap<u64, Zval>,
-    next: u64,
     /// The IDs of the completed futures.
     completions: mpsc::Sender<u64>,
     completed: mpsc::Receiver<u64>,
@@ -218,9 +308,9 @@ impl EventLoop {
     /// If the fiber is interrupted by an exception (an event-loop error thrown into `{main}`, or
     /// the fiber being destroyed), this waits for the future anyway, blocking the PHP thread, and
     /// returns its result with the exception pending: the future may borrow from the caller's
-    /// stack (see `php_async_impl`).
+    /// stack (see `php_async_impl`). For the same reason, `shutdown()` waits for the future.
     ///
-    /// Panics if the event loop is not initialized.
+    /// Panics if the event loop is not initialized, or if the future panicked.
     pub fn suspend_on<T: Send + 'static, F: Future<Output = T> + Send + 'static>(future: F) -> T {
         // What's going on here? Unsafe borrows???
         // NO: this is actually 100% safe, and here's why.
@@ -239,8 +329,10 @@ impl EventLoop {
         //
         // This only holds if suspend_on never returns (or unwinds) before the future has
         // completed: nothing below may panic once the future is spawned, and if the caller
-        // is not resumed by wakeup(), we wait for the future before returning.
-        let (id, suspension, slot) = Self::spawn(future).unwrap_or_else(|err| panic!("{}", err));
+        // is not resumed by wakeup(), we wait for the future before returning. If PHP frees the
+        // caller without unwinding it (a fatal error), shutdown() waits for the future.
+        let (id, suspension, slot) =
+            Self::spawn(future, true).unwrap_or_else(|err| panic!("{}", err));
         #[cfg(unix)]
         let pid = std::process::id();
         let interrupted = match Self::suspend(id, &suspension) {
@@ -263,7 +355,7 @@ impl EventLoop {
         let _ = interrupted;
         // Resumed by wakeup() once the future completed, this doesn't block; interrupted, this
         // waits for the future.
-        slot.wait()
+        slot.wait().unwrap_or_else(|| panic!("{}", PANICKED))
     }
 
     /// Like `suspend_on()`, but fails instead of panicking, and never waits for the future if
@@ -274,13 +366,15 @@ impl EventLoop {
     /// PHP destroying the fiber, at the end of the request or once nothing references it),
     /// returns `None`: the exit stays pending, as PHP must keep unwinding the fiber, so nothing
     /// may be thrown. Return any value then: PHP discards it.
+    ///
+    /// Fails if the future panicked.
     pub fn try_suspend_on<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
         future: F,
     ) -> PhpResult<Option<T>> {
-        let (id, suspension, slot) = Self::spawn(future)?;
+        let (id, suspension, slot) = Self::spawn(future, false)?;
         match Self::suspend(id, &suspension) {
-            // Resumed by wakeup() or drain() once the future completed: this doesn't block.
-            Suspended::Resumed => Ok(Some(slot.wait())),
+            // Resumed by wakeup() or drain() once the future ended: this doesn't block.
+            Suspended::Resumed => slot.wait().map(Some).ok_or_else(|| PANICKED.into()),
             Suspended::Failed(err) => Err(format!("Could not suspend the caller: {}", err).into()),
             Suspended::Exited => Ok(None),
             Suspended::Threw(exception) => {
@@ -289,9 +383,11 @@ impl EventLoop {
         }
     }
 
-    /// Spawns `future`, registering the caller's suspension.
+    /// Spawns `future`, registering the caller's suspension. `borrowing`: the future may borrow
+    /// from the caller (`suspend_on()`).
     fn spawn<T: Send + 'static, F: Future<Output = T> + Send + 'static>(
         future: F,
+        borrowing: bool,
     ) -> Result<(u64, Zval, Arc<Slot<T>>), String> {
         EVENTLOOP.with_borrow_mut(|c| {
             let c = c
@@ -303,24 +399,22 @@ impl EventLoop {
                 .ok()
                 .filter(|_| !ExecutorGlobals::has_exception())
                 .ok_or("Could not get the current suspension")?;
-            c.next += 1;
-            let id = c.next;
+            let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
             c.suspensions.insert(id, suspension.shallow_clone());
 
-            let slot = Arc::new(Slot {
-                value: Mutex::new(None),
-                ready: Condvar::new(),
-            });
-            let completions = c.completions.clone();
-            let notifier = c.notifier.clone();
-            let result = slot.clone();
-            let task = c.tasks.start();
+            let slot = Arc::new(Slot::new());
+            let task = c.tasks.start(borrowing);
+            let completion = Completion {
+                id,
+                slot: slot.clone(),
+                completions: c.completions.clone(),
+                notifier: c.notifier.clone(),
+            };
             c.handle.spawn(async move {
+                // Dropped in reverse order: the future, then the completion, then the task.
                 let _task = task;
-                result.set(future.await);
-                // Only the ID crosses threads, never a PHP value.
-                let _ = completions.send(id);
-                notifier.notify();
+                let completion = completion;
+                completion.slot.set(future.await);
             });
             Ok((id, suspension, slot))
         })
@@ -418,6 +512,10 @@ impl EventLoop {
     /// Releases the event loop. Callers still suspended are never resumed: their suspensions are
     /// released here, on the PHP thread. A runtime from `init_with()` is released once the
     /// futures running on it completed.
+    ///
+    /// Blocks until the futures of `suspend_on()` completed: they may borrow from their callers,
+    /// whose memory PHP frees without unwinding them after a fatal error (or a timeout). Call it
+    /// at the end of every request (RSHUTDOWN), which runs before PHP frees that memory.
     pub fn shutdown() {
         let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
         if let Some(mut event_loop) = event_loop {
@@ -427,6 +525,7 @@ impl EventLoop {
                 std::mem::forget(event_loop);
                 return;
             }
+            event_loop.tasks.wait_borrowing();
             if let Some(runtime) = event_loop.runtime.take() {
                 event_loop.tasks.release(runtime);
             }
@@ -449,14 +548,14 @@ impl EventLoop {
             #[cfg(unix)]
             pid: std::process::id(),
             suspensions: HashMap::new(),
-            next: 0,
             completions,
             completed,
             notifier: Arc::new(notifier),
             receiver,
-            handle: runtime
-                .as_ref()
-                .map_or_else(|| RUNTIME.handle().clone(), |r| r.handle().clone()),
+            handle: match &runtime {
+                Some(runtime) => runtime.handle().clone(),
+                None => shared_runtime()?,
+            },
             runtime,
             tasks: Arc::default(),
             get_current_suspension: Function::try_from_method(
@@ -466,6 +565,16 @@ impl EventLoop {
             .ok_or("\\Revolt\\EventLoop::getSuspension does not exist")?,
         })
     }
+}
+
+/// `RUNTIME`'s handle, unless `RUNTIME` was created before a fork, without its threads.
+fn shared_runtime() -> Result<Handle, &'static str> {
+    let handle = RUNTIME.handle().clone();
+    #[cfg(unix)]
+    if RUNTIME_PID.load(Ordering::SeqCst) != u64::from(std::process::id()) {
+        return Err(FORKED_RUNTIME);
+    }
+    Ok(handle)
 }
 
 impl EventLoop {

@@ -239,6 +239,74 @@ final class ShutdownTest extends TestCase
             PHP, setup: "require $autoload;");
     }
 
+    public function testShuttingDownWaitsForTheFuturesOfSuspendOnOnly(): void
+    {
+        // Their callers may be freed without being unwound (see the next test).
+        self::assertRuns("waited 0.5 s\n", <<<'PHP'
+            async(static fn () => Native::echo('borrowed', 500));
+            async(static fn () => Native::trySleep(5_000));
+            delay(0);
+            $start = hrtime(true);
+            Native::shutdown();
+            printf("waited %.1f s\n", (hrtime(true) - $start) / 1e9);
+            PHP);
+    }
+
+    public function testAFatalErrorEndsTheRequestOnceTheFuturesBorrowingFromSuspendedCallersCompleted(): void
+    {
+        // PHP frees the suspended fibers without unwinding them: shutdown(), at RSHUTDOWN, waits.
+        [$exit, $output, $elapsed] = self::runPhp(<<<'PHP'
+            async(static fn () => Native::echo('borrowed', 500));
+            delay(0);
+            ini_set('memory_limit', '16M');
+            str_repeat('x', 32 << 20);
+            PHP);
+        self::assertSame(255, $exit, $output);
+        self::assertStringContainsString('Allowed memory size', $output);
+        self::assertGreaterThanOrEqual(0.5, $elapsed);
+    }
+
+    public function testCallersOfAnEventLoopThatWasShutDownDontDisturbTheNextOne(): void
+    {
+        // Interrupted once a new event loop runs, the first caller unregisters itself from the
+        // event loop that was shut down, not the new caller.
+        self::assertRuns("interrupted\n1 200\n", <<<'PHP'
+            $suspension = null;
+            async(static function () use (&$suspension): void {
+                $suspension = EventLoop::getSuspension();
+                try {
+                    Native::trySleep(5_000);
+                } catch (Exception $e) {
+                    echo $e->getMessage(), "\n";
+                }
+            });
+            delay(0);
+            Native::shutdown();
+            $stream = Native::initWith();
+            stream_set_blocking($stream, false);
+            EventLoop::onReadable($stream, static fn () => Native::wakeup());
+            $future = async(Native::sleep(...), 200);
+            delay(0);
+            $suspension->throw(new Exception('interrupted'));
+            delay(0);
+            echo Native::pending(), ' ', $future->await(new Amp\TimeoutCancellation(2)), "\n";
+            PHP);
+    }
+
+    public function testAFuturePanickingFailsItsCaller(): void
+    {
+        self::assertRuns("Rust panic: php-tokio: the future panicked\nphp-tokio: the future panicked\n0\n", <<<'PHP'
+            foreach ([Native::panic(...), Native::tryPanic(...)] as $call) {
+                try {
+                    $call(100);
+                } catch (Throwable $e) {
+                    echo $e->getMessage(), "\n";
+                }
+            }
+            echo Native::pending(), "\n";
+            PHP, panics: ['the future of panic()', 'php-tokio: the future panicked', 'the future of tryPanic()']);
+    }
+
     public function testEveryEntryPointNeedsInit(): void
     {
         $autoload = var_export(\dirname(__DIR__).'/vendor/autoload.php', true);
@@ -431,6 +499,35 @@ final class ShutdownTest extends TestCase
         ];
         $lines = array_values(array_unique(explode("\n", trim($output))));
         self::assertSame([...$errors, 'ok'], $lines, $output);
+    }
+
+    #[RequiresFunction('pcntl_fork')]
+    public function testAForkedChildCanOnlyInitializeWithARuntimeOfItsOwn(): void
+    {
+        // The shared runtime, used before the fork, has no threads in the child.
+        self::assertRuns(
+            "php-tokio: init() cannot be used after fork, as the shared runtime's threads are not inherited: use init_with()\n2\nchild: 0\n",
+            <<<'PHP'
+            Native::sleep(1);
+            $pid = pcntl_fork();
+            if ($pid === 0) {
+                Native::shutdown();
+                try {
+                    Native::init();
+                } catch (Exception $e) {
+                    echo $e->getMessage(), "\n";
+                }
+                $stream = Native::initWith();
+                stream_set_blocking($stream, false);
+                EventLoop::onReadable($stream, static fn () => Native::wakeup());
+                echo Native::sleep(2), "\n";
+                exit(0);
+            }
+            pcntl_waitpid($pid, $status);
+            echo 'child: ', pcntl_wexitstatus($status), "\n";
+            PHP,
+            'init',
+        );
     }
 
     #[RequiresFunction('pcntl_fork')]

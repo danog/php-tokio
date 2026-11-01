@@ -118,6 +118,20 @@ impl Native {
         value.to_owned()
     }
 
+    /// Panics after `ms` milliseconds.
+    pub async fn panic(ms: u64) -> u64 {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        panic!("the future of panic()");
+    }
+
+    /// Like `panic()`, through `try_suspend_on()`.
+    pub fn try_panic(ms: u64) -> PhpResult<Option<u64>> {
+        EventLoop::try_suspend_on(async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            panic!("the future of tryPanic()");
+        })
+    }
+
     /// Fails with `message` after `ms` milliseconds.
     pub async fn fail(message: String, ms: u64) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(ms)).await;
