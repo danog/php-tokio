@@ -1,0 +1,16 @@
+[package]
+name = "php-tokio-test-extension"
+description = "The PHP extension php-tokio's test suite (tests/) runs against."
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+# The rlib makes cargo test build the extension for tests/phpunit.rs, which runs it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+php-tokio = { path = "../.." }
+ext-php-rs = { version = "^0.16.3", features = ["anyhow"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "time"] }
+anyhow = "^1.0.104"

@@ -1,4 +1,6 @@
-use ext_php_rs::prelude::*;
+#![cfg_attr(windows, feature(abi_vectorcall))]
+
+use ext_php_rs::{prelude::*, types::Zval};
 use php_tokio::{php_async_impl, EventLoop};
 
 #[php_class]
@@ -6,7 +8,7 @@ struct Client {}
 
 #[php_async_impl]
 impl Client {
-    pub fn init() -> PhpResult<u64> {
+    pub fn init() -> PhpResult<Zval> {
         EventLoop::init()
     }
     pub fn wakeup() -> PhpResult<()> {

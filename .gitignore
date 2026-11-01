@@ -3,3 +3,6 @@
 /crates/*/target
 vendor
 composer.lock
+.phpunit.result.cache
+/mutants.out*
+*.profraw

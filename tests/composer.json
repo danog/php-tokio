@@ -1,0 +1,19 @@
+{
+    "name": "danog/php-tokio-tests",
+    "description": "php-tokio's test suite, run against crates/test-extension.",
+    "type": "project",
+    "license": "Apache-2.0",
+    "require": {
+        "php": ">=8.2",
+        "revolt/event-loop": "^1.0",
+        "amphp/amp": "^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "PhpTokio\\Test\\": "src/"
+        }
+    }
+}

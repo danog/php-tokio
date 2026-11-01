@@ -19,6 +19,14 @@
 
 use ext_php_rs::binary_slice::{BinarySlice, PackSlice};
 
+/// Extends the lifetime of a borrow to any lifetime.
+///
+/// # Safety
+///
+/// The borrowed value must outlive every use of the result: php_async_impl relies on
+/// `EventLoop::suspend_on` returning only once the future using it completed. Never pass the
+/// result to `EventLoop::try_suspend_on`, which doesn't wait for the future if the caller is
+/// interrupted.
 #[inline(always)]
 pub unsafe fn borrow_unchecked<
     'original,

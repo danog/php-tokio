@@ -1,0 +1,7 @@
+# cargo mutants: php-tokio's code runs inside PHP, so every mutant is tested by the PHPUnit suite
+# (crates/test-extension/tests/phpunit.rs runs it), and the macros by their unit tests. Set
+# PHP_TOKIO_TESTS to the tests/ directory with its vendor/ (cargo-mutants builds copies of the
+# tree without it).
+exclude_globs = ["crates/test-extension/**", "examples/**"]
+# The baseline too.
+test_workspace = true
