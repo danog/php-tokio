@@ -17,6 +17,7 @@ use ext_php_rs::{
     boxed::ZBox,
     call_user_func,
     exception::{throw_object, PhpException},
+    ffi::zend_resource,
     prelude::*,
     types::{ZendObject, Zval},
     zend::{ClassEntry, ExecutorGlobals, Function},
@@ -25,11 +26,12 @@ use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
     collections::HashMap,
+    ffi::{c_char, c_int, c_void},
     future::Future,
-    io,
+    io, ptr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Condvar, Mutex,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -48,6 +50,26 @@ lazy_static! {
 /// The process that created `RUNTIME`: its threads aren't inherited by forked children.
 #[cfg(unix)]
 static RUNTIME_PID: AtomicU64 = AtomicU64::new(0);
+
+/// The type of the resources that shut the event loop down at the end of the request.
+static REQUEST_END: OnceLock<c_int> = OnceLock::new();
+
+/// The destructor of a resource of type `REQUEST_END`. At the end of the request, PHP destroys the
+/// resources once the extensions' RSHUTDOWN ran, and only then frees the objects, fibers
+/// included.
+extern "C" fn request_end(_: *mut zend_resource) {
+    EventLoop::shutdown();
+}
+
+extern "C" {
+    fn zend_register_list_destructors_ex(
+        ld: Option<extern "C" fn(*mut zend_resource)>,
+        pld: Option<extern "C" fn(*mut zend_resource)>,
+        type_name: *const c_char,
+        module_number: c_int,
+    ) -> c_int;
+    fn zend_register_resource(rsrc_pointer: *mut c_void, rsrc_type: c_int) -> *mut zend_resource;
+}
 
 /// The ID of the next caller, unique in the process: a caller of an event loop that was shut down
 /// can still be interrupted, and unregister itself, once a new event loop is initialized.
@@ -514,8 +536,11 @@ impl EventLoop {
     /// futures running on it completed.
     ///
     /// Blocks until the futures of `suspend_on()` completed: they may borrow from their callers,
-    /// whose memory PHP frees without unwinding them after a fatal error (or a timeout). Call it
-    /// at the end of every request (RSHUTDOWN), which runs before PHP frees that memory.
+    /// whose memory PHP frees without unwinding them after a fatal error (or a timeout).
+    ///
+    /// Called at the end of every request, after the extensions' RSHUTDOWN, and before PHP frees
+    /// the request's resources and objects, which the event loop holds: call it earlier (in
+    /// RSHUTDOWN, or from PHP) to release the event loop sooner. Calling it again does nothing.
     pub fn shutdown() {
         let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
         if let Some(mut event_loop) = event_loop {
@@ -543,6 +568,15 @@ impl EventLoop {
                 return Err(format!("\\{} does not exist", name).into());
             }
         }
+
+        // Shuts the event loop down at the end of the request (see shutdown()), with a resource of
+        // the request, which PHP destroys then. Its type is registered by the first event loop of
+        // the process: under ZTS, other threads may meanwhile look types up in the table, which
+        // this doesn't reallocate (PHP 8 registers few resource types, in a table of 64).
+        let request_end = *REQUEST_END.get_or_init(|| unsafe {
+            zend_register_list_destructors_ex(Some(request_end), None, c"php-tokio".as_ptr(), 0)
+        });
+        unsafe { zend_register_resource(ptr::null_mut(), request_end) };
 
         Ok(Self {
             #[cfg(unix)]

@@ -61,6 +61,18 @@ Got response from https://httpbin.org/delay/5 after ~5 seconds!
 
 See the [source code](https://github.com/danog/php-tokio/tree/master/examples/reqwest) of the example for more info on how it works!
 
+## Usage
+
+In your extension, make your async methods' class a `#[php_async_impl]`, and expose `EventLoop::init()` (or `EventLoop::init_with()`, to choose the Tokio runtime) and `EventLoop::wakeup()`. The PHP side watches the stream that `init()` returns:
+
+```php
+$stream = \MyExtension::init();
+stream_set_blocking($stream, false);
+Revolt\EventLoop::onReadable($stream, fn () => \MyExtension::wakeup());
+```
+
+Don't close the stream: `init()` returns the same one every time. php-tokio shuts the event loop down at the end of every request (`EventLoop::shutdown()` does it earlier), once the futures borrowing from their callers completed.
+
 ## Built with php-tokio
 
 Here's a list of async PHP extensions built with php-tokio ([add yours by editing this file!](https://github.com/danog/php-tokio/edit/master/README.md)):
