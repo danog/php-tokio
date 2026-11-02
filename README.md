@@ -73,8 +73,14 @@ Revolt\EventLoop::onReadable($stream, fn () => \MyExtension::wakeup());
 
 Don't close the stream: `init()` returns the same one every time. php-tokio shuts the event loop down at the end of every request (`EventLoop::shutdown()` does it earlier), once the futures borrowing from their callers completed.
 
+The main example of a complete integration is [MadelineProto](https://github.com/danog/MadelineProto)'s native crypto extension, [`madeline_crypto`](https://github.com/danog/MadelineProto/tree/v8/native):
+
+- [`native/src/php.rs`](https://github.com/danog/MadelineProto/blob/v8/native/src/php.rs) is the Rust side: a runtime of its own with `EventLoop::init_with()`, `EventLoop::wakeup()`, fallible suspension with `EventLoop::try_suspend_on()`, and an orderly shutdown with `EventLoop::drain()` and `EventLoop::shutdown()`.
+- [`src/MTProtoTools/Crypt/NativeExecutor.php`](https://github.com/danog/MadelineProto/blob/v8/src/MTProtoTools/Crypt/NativeExecutor.php) is the PHP side: it watches the stream, keeps the Revolt watcher unreferenced while no operation is pending, and closes the bridge in a shutdown function.
+
 ## Built with php-tokio
 
 Here's a list of async PHP extensions built with php-tokio ([add yours by editing this file!](https://github.com/danog/php-tokio/edit/master/README.md)):
 
+- [danog/MadelineProto](https://github.com/danog/MadelineProto/tree/v8/native) - Async Telegram MTProto client, whose native extension runs the cryptography on a Rust worker
 - [nicelocal/mongo-php-async-driver](https://github.com/Nicelocal/mongo-php-async-driver) - An async MongoDB PHP extension
