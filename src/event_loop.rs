@@ -577,9 +577,10 @@ fn keep_loaded() -> PhpResult<()> {
     let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN;
     let mut module = ptr::null_mut();
     let pinned = unsafe { GetModuleHandleExW(flags, address, &mut module) } != 0;
-    // The module of one of its own functions is always found: never called.
-    let error = || format!("{PIN_ERROR}: {}", io::Error::last_os_error()).into();
-    pinned.then_some(()).ok_or_else(error)
+    // Formatted either way, for the coverage: the module of one of its own functions is always
+    // found.
+    let error = format!("{PIN_ERROR}: {}", io::Error::last_os_error());
+    pinned.then_some(()).ok_or(error.into())
 }
 
 #[cfg(not(windows))]
