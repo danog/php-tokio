@@ -5,6 +5,12 @@
          colors="true"
          failOnWarning="true"
          failOnRisky="true">
+    <php>
+        <!-- The fork tests need a driver that keeps no kernel state shared with a forked child: since
+             revolt/event-loop 1.1, PHP 8.6 gets IoPollDriver, whose epoll instance a child shares (its watchers'
+             removal removes the parent's) and whose kqueue (macOS) it doesn't inherit. -->
+        <env name="REVOLT_DRIVER" value="Revolt\EventLoop\Driver\StreamSelectDriver" force="true"/>
+    </php>
     <testsuites>
         <testsuite name="php-tokio">
             <directory>src</directory>
