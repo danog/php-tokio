@@ -6,9 +6,11 @@ on:
   pull_request:
 
 jobs:
+  # ubuntu-24.04, not ubuntu-latest (26.04, x86_64): there, ext-php-rs's bindgen fails to generate the bindings,
+  # with errors in clang 21's xmmintrin.h and emmintrin.h.
   lint:
     name: rustfmt and clippy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -28,12 +30,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
         php: ["8.2", "8.5", "8.6"]
         ts: [nts]
         include:
           # thread-safe PHP too (docker-library's images of PHP 8.6 are only ZTS)
-          - { os: ubuntu-latest, php: "8.6", ts: ts }
+          - { os: ubuntu-24.04, php: "8.6", ts: ts }
     defaults:
       run:
         shell: bash
@@ -82,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     defaults:
       run:
         shell: bash
@@ -120,7 +122,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             mutants: --exclude src/notify/windows.rs
           - os: windows-latest
             mutants: --file src/notify/windows.rs

@@ -530,6 +530,9 @@ final class ShutdownTest extends TestCase
             echo 'child: ', pcntl_wexitstatus($status), "\n";
             PHP,
             'init',
+            // A driver the child can keep using: since revolt/event-loop 1.1, PHP 8.6 gets IoPollDriver, whose
+            // kqueue (macOS) a forked child doesn't inherit, and a running driver can't be swapped.
+            env: ['REVOLT_DRIVER' => 'Revolt\\EventLoop\\Driver\\StreamSelectDriver'],
         );
     }
 
