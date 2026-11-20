@@ -226,6 +226,8 @@ impl Drop for Task {
 }
 
 const SOCKET_ERROR: &str = "Could not create the notification socket";
+#[cfg(windows)]
+const PIN_ERROR: &str = "Could not keep the extension loaded";
 
 pub struct EventLoop {
     /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
@@ -289,6 +291,8 @@ impl EventLoop {
         EVENTLOOP.with_borrow_mut(|e| {
             let event_loop = match e {
                 None => {
+                    // Before any thread of the runtime starts.
+                    keep_loaded()?;
                     let runtime = runtime()
                         .map_err(|err| format!("Could not build the Tokio runtime: {}", err))?;
                     e.insert(Self::new(runtime)?)
@@ -536,6 +540,34 @@ impl EventLoop {
             .ok_or("\\Revolt\\EventLoop::getSuspension does not exist")?,
         })
     }
+}
+
+/// Keeps the module php-tokio is linked into loaded until the process exits.
+///
+/// PHP unloads the extensions at the end of the process (`zend_destroy_modules()`), while the
+/// threads of the runtimes may still run their code: those of `RUNTIME`, never shut down, and
+/// those of a runtime from `init_with()` that is released in the background, both running the
+/// futures of `try_suspend_on()` that PHP stopped waiting for. Linux and macOS never unload a
+/// module whose threads registered thread-local destructors (Tokio's do), but on Windows,
+/// `FreeLibrary()` would unmap the code under them: pin it.
+#[cfg(windows)]
+fn keep_loaded() -> PhpResult<()> {
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+    };
+    // The module that contains this function; pinning it again does nothing.
+    let address = keep_loaded as *const () as *const u16;
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN;
+    let mut module = ptr::null_mut();
+    let pinned = unsafe { GetModuleHandleExW(flags, address, &mut module) } != 0;
+    // The module of one of its own functions is always found: never called.
+    let error = || format!("{PIN_ERROR}: {}", io::Error::last_os_error()).into();
+    pinned.then_some(()).ok_or_else(error)
+}
+
+#[cfg(not(windows))]
+fn keep_loaded() -> PhpResult<()> {
+    Ok(())
 }
 
 /// How a caller's suspension ended.
