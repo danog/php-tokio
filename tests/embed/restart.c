@@ -3,6 +3,8 @@
 //
 // Usage: restart <script> <runs>
 
+// PHP's headers use memrchr().
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <sapi/embed/php_embed.h>
 
