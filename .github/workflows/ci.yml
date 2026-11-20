@@ -47,7 +47,6 @@ jobs:
           php-version: ${{ matrix.php }}
           coverage: none
           tools: composer
-          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
         env:
           phpts: ${{ matrix.ts }}
 
@@ -96,7 +95,6 @@ jobs:
           php-version: "8.5"
           coverage: none
           tools: composer
-          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -137,7 +135,6 @@ jobs:
           php-version: "8.5"
           coverage: none
           tools: composer
-          extensions: ${{ runner.os != 'Windows' && 'pcntl, posix' || '' }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
