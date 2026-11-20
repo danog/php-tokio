@@ -76,6 +76,32 @@ jobs:
           # ShutdownTest starts PHP processes of its own with the extension.
           PHP_TOKIO_TEST_EXTENSION="$extension" php -d "extension=$extension" vendor/bin/phpunit
 
+  restart:
+    # PHP started again in the same process (as FrankenPHP restarts it), with the module still
+    # loaded: tests/embed/restart.sh, on the embed SAPI of Ubuntu's PHP.
+    name: PHP restarted in one process, ubuntu-24.04
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PHP 8.3 with the embed SAPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends php8.3-cli php8.3-dev php8.3-xml php8.3-mbstring libphp8.3-embed composer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: restart
+      - name: Build the test extension
+        env:
+          PHP: /usr/bin/php8.3
+          PHP_CONFIG: /usr/bin/php-config8.3
+        run: cargo build --release -p php-tokio-test-extension
+      - name: Install the test suite's dependencies
+        working-directory: tests
+        run: /usr/bin/php8.3 "$(command -v composer)" install --no-interaction --no-progress
+      - name: Start PHP 3 times in one process
+        run: tests/embed/restart.sh target/release/libphp_tokio_test_extension.so /usr/bin/php-config8.3
+
   coverage:
     # Every line and function of php-tokio's Rust code covered: tests/coverage.sh fails otherwise.
     name: coverage, ${{ matrix.os }}

@@ -143,6 +143,19 @@ final class ShutdownTest extends TestCase
         self::assertLessThan(4.0, $elapsed, 'try_suspend_on() did not wait for the future');
     }
 
+    #[DataProvider('initializers')]
+    public function testTheProcessExitsWhileAFutureOfTrySuspendOnRuns(string $init): void
+    {
+        // The future still runs on a thread of the runtime when PHP unloads the extension, at the
+        // end of the process: on Windows, unloading it would unmap the code the thread runs.
+        $elapsed = self::assertRuns("exiting\n", <<<'PHP'
+            async(static fn () => Native::trySpin(5_000));
+            delay(0.05);
+            echo "exiting\n";
+            PHP, $init);
+        self::assertLessThan(4.0, $elapsed, 'try_suspend_on() did not wait for the future');
+    }
+
     public function testExitInterruptsTrySuspendOn(): void
     {
         // exit() in a fiber unwinds it with an unwind exit, which stays pending too.

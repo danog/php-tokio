@@ -26,12 +26,12 @@ use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
     collections::HashMap,
-    ffi::{c_char, c_int, c_void},
+    ffi::{c_char, c_int, c_void, CStr},
     future::Future,
     io, ptr,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Condvar, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -43,8 +43,11 @@ lazy_static! {
     pub static ref RUNTIME: Runtime = Runtime::new().expect("Could not allocate runtime");
 }
 
-/// The type of the resources that shut the event loop down at the end of the request.
-static REQUEST_END: OnceLock<c_int> = OnceLock::new();
+/// The name of the type of the resources that shut the event loop down at the end of the request.
+const REQUEST_END: &CStr = c"php-tokio";
+
+/// Held while the type is looked up and registered: under ZTS, by one thread at a time.
+static REQUEST_END_TYPE: Mutex<()> = Mutex::new(());
 
 /// The destructor of a resource of type `REQUEST_END`. At the end of the request, PHP destroys the
 /// resources once the extensions' RSHUTDOWN ran, and only then frees the objects, fibers
@@ -61,6 +64,7 @@ extern "C" {
         module_number: c_int,
     ) -> c_int;
     fn zend_register_resource(rsrc_pointer: *mut c_void, rsrc_type: c_int) -> *mut zend_resource;
+    fn zend_fetch_list_dtor_id(type_name: *const c_char) -> c_int;
 }
 
 /// The ID of the next caller, unique in the process: a caller of an event loop that was shut down
@@ -226,6 +230,8 @@ impl Drop for Task {
 }
 
 const SOCKET_ERROR: &str = "Could not create the notification socket";
+#[cfg(windows)]
+const PIN_ERROR: &str = "Could not keep the extension loaded";
 
 pub struct EventLoop {
     /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
@@ -289,6 +295,8 @@ impl EventLoop {
         EVENTLOOP.with_borrow_mut(|e| {
             let event_loop = match e {
                 None => {
+                    // Before any thread of the runtime starts.
+                    keep_loaded()?;
                     let runtime = runtime()
                         .map_err(|err| format!("Could not build the Tokio runtime: {}", err))?;
                     e.insert(Self::new(runtime)?)
@@ -509,12 +517,25 @@ impl EventLoop {
         }
 
         // Shuts the event loop down at the end of the request (see shutdown()), with a resource of
-        // the request, which PHP destroys then. Its type is registered by the first event loop of
-        // the process: under ZTS, other threads may meanwhile look types up in the table, which
-        // this doesn't reallocate (PHP 8 registers few resource types, in a table of 64).
-        let request_end = *REQUEST_END.get_or_init(|| unsafe {
-            zend_register_list_destructors_ex(Some(request_end), None, c"php-tokio".as_ptr(), 0)
-        });
+        // the request, which PHP destroys then. Its type is registered by the first event loop
+        // since PHP started, looked up by name afterwards: the module outlives PHP (see
+        // keep_loaded()), which may start again in the same process, with a new table of types.
+        // Under ZTS, other threads may meanwhile look types up in the table, which this doesn't
+        // reallocate (PHP 8 registers few resource types, in a table of 64).
+        let request_end = {
+            let _registering = REQUEST_END_TYPE.lock().unwrap();
+            match unsafe { zend_fetch_list_dtor_id(REQUEST_END.as_ptr()) } {
+                0 => unsafe {
+                    zend_register_list_destructors_ex(
+                        Some(request_end),
+                        None,
+                        REQUEST_END.as_ptr(),
+                        0,
+                    )
+                },
+                id => id,
+            }
+        };
         unsafe { zend_register_resource(ptr::null_mut(), request_end) };
 
         Ok(Self {
@@ -536,6 +557,35 @@ impl EventLoop {
             .ok_or("\\Revolt\\EventLoop::getSuspension does not exist")?,
         })
     }
+}
+
+/// Keeps the module php-tokio is linked into loaded until the process exits.
+///
+/// PHP unloads the extensions at the end of the process (`zend_destroy_modules()`), while the
+/// threads of the runtimes may still run their code: those of `RUNTIME`, never shut down, and
+/// those of a runtime from `init_with()` that is released in the background, both running the
+/// futures of `try_suspend_on()` that PHP stopped waiting for. Linux and macOS never unload a
+/// module whose threads registered thread-local destructors (Tokio's do), but on Windows,
+/// `FreeLibrary()` would unmap the code under them: pin it.
+#[cfg(windows)]
+fn keep_loaded() -> PhpResult<()> {
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+    };
+    // The module that contains this function; pinning it again does nothing.
+    let address = keep_loaded as *const () as *const u16;
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN;
+    let mut module = ptr::null_mut();
+    let pinned = unsafe { GetModuleHandleExW(flags, address, &mut module) } != 0;
+    // Formatted either way, for the coverage: the module of one of its own functions is always
+    // found.
+    let error = format!("{PIN_ERROR}: {}", io::Error::last_os_error());
+    pinned.then_some(()).ok_or(error.into())
+}
+
+#[cfg(not(windows))]
+fn keep_loaded() -> PhpResult<()> {
+    Ok(())
 }
 
 /// How a caller's suspension ended.

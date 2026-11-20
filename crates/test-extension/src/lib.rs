@@ -21,7 +21,7 @@ use php_tokio::{borrow_unchecked::borrow_unchecked, php_async_impl, EventLoop};
 use std::{
     io,
     sync::atomic::{AtomicUsize, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// The name of the threads of the runtime from `initWith()`.
@@ -93,6 +93,18 @@ impl Native {
     pub fn try_sleep(ms: u64) -> PhpResult<Option<u64>> {
         EventLoop::try_suspend_on(async move {
             tokio::time::sleep(Duration::from_millis(ms)).await;
+            ms
+        })
+    }
+
+    /// Like `trySleep()`, but the future keeps a thread of the runtime busy for `ms` milliseconds:
+    /// it yields without ever parking it.
+    pub fn try_spin(ms: u64) -> PhpResult<Option<u64>> {
+        EventLoop::try_suspend_on(async move {
+            let deadline = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < deadline {
+                tokio::task::yield_now().await;
+            }
             ms
         })
     }
