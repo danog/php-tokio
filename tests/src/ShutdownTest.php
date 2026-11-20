@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpTokio\Test;
 
 use PHPUnit\Framework\Attributes\DataProvider;
-use PHPUnit\Framework\Attributes\RequiresFunction;
 use PHPUnit\Framework\Attributes\RequiresOperatingSystemFamily;
 use PHPUnit\Framework\TestCase;
 
@@ -502,53 +501,5 @@ final class ShutdownTest extends TestCase
         ];
         $lines = array_values(array_unique(explode("\n", trim($output))));
         self::assertSame([...$errors, 'ok'], $lines, $output);
-    }
-
-    #[RequiresFunction('pcntl_fork')]
-    public function testAForkedChildCanOnlyInitializeWithARuntimeOfItsOwn(): void
-    {
-        // The shared runtime, used before the fork, has no threads in the child.
-        self::assertRuns(
-            "php-tokio: init() cannot be used after fork, as the shared runtime's threads are not inherited: use init_with()\n2\nchild: 0\n",
-            <<<'PHP'
-            Native::sleep(1);
-            $pid = pcntl_fork();
-            if ($pid === 0) {
-                Native::shutdown();
-                try {
-                    Native::init();
-                } catch (Exception $e) {
-                    echo $e->getMessage(), "\n";
-                }
-                $stream = Native::initWith();
-                stream_set_blocking($stream, false);
-                EventLoop::onReadable($stream, static fn () => Native::wakeup());
-                echo Native::sleep(2), "\n";
-                exit(0);
-            }
-            pcntl_waitpid($pid, $status);
-            echo 'child: ', pcntl_wexitstatus($status), "\n";
-            PHP,
-            'init',
-        );
-    }
-
-    #[RequiresFunction('pcntl_fork')]
-    public function testACallPendingAcrossForkEndsTheChildWithAnErrorInsteadOfHanging(): void
-    {
-        // The child's copy of the fiber waits for a future that only runs in the parent.
-        [$exit, $output, , $errors] = self::runPhp(<<<'PHP'
-            $future = async(static fn () => Native::sleep(300));
-            delay(0);
-            $pid = pcntl_fork();
-            if ($pid === 0) {
-                exit(0);
-            }
-            pcntl_waitpid($pid, $status);
-            echo "\nchild: ", pcntl_wexitstatus($status), "\nparent: ", $future->await(), "\n";
-            PHP);
-        // PHP absorbs the Error while it destroys the fiber, at the end of the child's request.
-        self::assertSame([0, "\nchild: 0\nparent: 300\n"], [$exit, $output], $errors);
-        self::assertPanics(['php-tokio: this call was pending when the process forked, and can only complete in the parent'], $errors);
     }
 }

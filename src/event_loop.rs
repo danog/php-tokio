@@ -40,16 +40,8 @@ use tokio::runtime::{Handle, Runtime};
 lazy_static! {
     /// The runtime of the event loops initialized with `EventLoop::init()`, shared by every
     /// request of the process.
-    pub static ref RUNTIME: Runtime = {
-        #[cfg(unix)]
-        RUNTIME_PID.store(std::process::id().into(), Ordering::SeqCst);
-        Runtime::new().expect("Could not allocate runtime")
-    };
+    pub static ref RUNTIME: Runtime = Runtime::new().expect("Could not allocate runtime");
 }
-
-/// The process that created `RUNTIME`: its threads aren't inherited by forked children.
-#[cfg(unix)]
-static RUNTIME_PID: AtomicU64 = AtomicU64::new(0);
 
 /// The type of the resources that shut the event loop down at the end of the request.
 static REQUEST_END: OnceLock<c_int> = OnceLock::new();
@@ -233,26 +225,9 @@ impl Drop for Task {
     }
 }
 
-/// Tokio's threads don't survive a fork: only the process that initialized an event loop can use
-/// it.
 const SOCKET_ERROR: &str = "Could not create the notification socket";
 
-#[cfg(unix)]
-const PENDING_ACROSS_FORK: &str =
-    "php-tokio: this call was pending when the process forked, and can only complete in the parent";
-
-#[cfg(unix)]
-const FORKED: &str = "php-tokio cannot be used after fork: Tokio's threads are not inherited";
-
-#[cfg(unix)]
-const FORKED_RUNTIME: &str =
-    "php-tokio: init() cannot be used after fork, as the shared runtime's threads are not inherited: use init_with()";
-
 pub struct EventLoop {
-    /// The process that initialized the event loop.
-    #[cfg(unix)]
-    pid: u32,
-
     /// The suspensions of the callers waiting for a future, by ID. PHP values never leave the
     /// PHP thread: only the IDs of the completed futures cross threads.
     suspensions: HashMap<u64, Zval>,
@@ -320,7 +295,6 @@ impl EventLoop {
                 }
                 Some(event_loop) => event_loop,
             };
-            event_loop.check_owned()?;
             event_loop.receiver.php_stream()
         })
     }
@@ -355,28 +329,11 @@ impl EventLoop {
         // caller without unwinding it (a fatal error), shutdown() waits for the future.
         let (id, suspension, slot) =
             Self::spawn(future, true).unwrap_or_else(|err| panic!("{}", err));
-        #[cfg(unix)]
-        let pid = std::process::id();
-        let interrupted = match Self::suspend(id, &suspension) {
-            Suspended::Resumed | Suspended::Failed(_) => false,
-            // Pending for the caller.
-            Suspended::Exited => true,
-            Suspended::Threw(exception) => {
-                rethrow(exception);
-                true
-            }
-        };
-        // In a process forked meanwhile (whose copy of the fiber PHP destroys), the future never
-        // completes: it runs on Tokio's threads, in the parent. Nothing here uses what it borrows,
-        // so unwind rather than wait forever: ext-php-rs throws nothing over the pending exception.
-        #[cfg(unix)]
-        if interrupted && pid != std::process::id() {
-            panic!("{}", PENDING_ACROSS_FORK);
+        if let Suspended::Threw(exception) = Self::suspend(id, &suspension) {
+            rethrow(exception);
         }
-        #[cfg(not(unix))]
-        let _ = interrupted;
-        // Resumed by wakeup() once the future completed, this doesn't block; interrupted, this
-        // waits for the future.
+        // Resumed by wakeup() once the future completed, this doesn't block; interrupted (an
+        // exit, left pending for the caller, or an exception), this waits for the future.
         slot.wait().unwrap_or_else(|| panic!("{}", PANICKED))
     }
 
@@ -415,7 +372,6 @@ impl EventLoop {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
-            c.check_owned()?;
             // An exception thrown by getSuspension() stays pending, as the previous one.
             let suspension = call_user_func!(c.get_current_suspension)
                 .ok()
@@ -465,18 +421,11 @@ impl EventLoop {
     }
 
     /// Resumes the callers whose future completed.
-    ///
-    /// In a process forked from the one that initialized the event loop, does nothing: the
-    /// notification socket is shared with the parent, whose notifications must stay there.
     pub fn wakeup() -> PhpResult<()> {
         let ready = EVENTLOOP.with_borrow_mut(|c| -> PhpResult<Vec<Zval>> {
             let c = c
                 .as_mut()
                 .ok_or("php-tokio's EventLoop::init() must be called first")?;
-            #[cfg(unix)]
-            if c.check_owned().is_err() {
-                return Ok(vec![]);
-            }
             c.receiver.drain();
             c.notifier.rearm();
             Ok(c.completed
@@ -496,7 +445,7 @@ impl EventLoop {
     pub fn drain(timeout: Duration) -> PhpResult<()> {
         let deadline = Instant::now() + timeout;
         let ready = EVENTLOOP.with_borrow_mut(|c| {
-            let Some(c) = c.as_mut().filter(|c| c.check_owned().is_ok()) else {
+            let Some(c) = c.as_mut() else {
                 return vec![];
             };
             let mut ready = vec![];
@@ -524,11 +473,7 @@ impl EventLoop {
 
     /// The number of suspended callers.
     pub fn pending() -> usize {
-        EVENTLOOP.with_borrow(|c| {
-            c.as_ref()
-                .filter(|c| c.check_owned().is_ok())
-                .map_or(0, |c| c.suspensions.len())
-        })
+        EVENTLOOP.with_borrow(|c| c.as_ref().map_or(0, |c| c.suspensions.len()))
     }
 
     /// Releases the event loop. Callers still suspended are never resumed: their suspensions are
@@ -544,12 +489,6 @@ impl EventLoop {
     pub fn shutdown() {
         let event_loop = EVENTLOOP.with_borrow_mut(Option::take);
         if let Some(mut event_loop) = event_loop {
-            #[cfg(unix)]
-            if event_loop.check_owned().is_err() {
-                // Inherited across fork: the parent owns the socket and the runtime.
-                std::mem::forget(event_loop);
-                return;
-            }
             event_loop.tasks.wait_borrowing();
             if let Some(runtime) = event_loop.runtime.take() {
                 event_loop.tasks.release(runtime);
@@ -579,8 +518,6 @@ impl EventLoop {
         unsafe { zend_register_resource(ptr::null_mut(), request_end) };
 
         Ok(Self {
-            #[cfg(unix)]
-            pid: std::process::id(),
             suspensions: HashMap::new(),
             completions,
             completed,
@@ -588,7 +525,7 @@ impl EventLoop {
             receiver,
             handle: match &runtime {
                 Some(runtime) => runtime.handle().clone(),
-                None => shared_runtime()?,
+                None => RUNTIME.handle().clone(),
             },
             runtime,
             tasks: Arc::default(),
@@ -598,34 +535,6 @@ impl EventLoop {
             )
             .ok_or("\\Revolt\\EventLoop::getSuspension does not exist")?,
         })
-    }
-}
-
-/// `RUNTIME`'s handle, unless `RUNTIME` was created before a fork, without its threads.
-fn shared_runtime() -> Result<Handle, &'static str> {
-    let handle = RUNTIME.handle().clone();
-    #[cfg(unix)]
-    if RUNTIME_PID.load(Ordering::SeqCst) != u64::from(std::process::id()) {
-        return Err(FORKED_RUNTIME);
-    }
-    Ok(handle)
-}
-
-impl EventLoop {
-    /// Fails in a process forked from the one that initialized the event loop.
-    #[cfg(unix)]
-    fn check_owned(&self) -> Result<(), &'static str> {
-        if self.pid == std::process::id() {
-            Ok(())
-        } else {
-            Err(FORKED)
-        }
-    }
-
-    /// Windows has no fork.
-    #[cfg(not(unix))]
-    fn check_owned(&self) -> Result<(), &'static str> {
-        Ok(())
     }
 }
 

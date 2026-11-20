@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace PhpTokio\Test;
 
 use Amp\TimeoutCancellation;
-use PHPUnit\Framework\Attributes\RequiresFunction;
 use PHPUnit\Framework\TestCase;
 use Revolt\EventLoop;
 use Revolt\EventLoop\UncaughtThrowable;
@@ -297,67 +296,4 @@ final class EventLoopTest extends TestCase
         self::assertSame([1, 2], self::awaitAll([async(Native::sleep(...), 1), async(Native::sleep(...), 2)]));
     }
 
-    #[RequiresFunction('pcntl_fork')]
-    public function testAForkedChildCanNeitherUseNorDisturbTheEventLoop(): void
-    {
-        // Pending in the parent across the fork (with try_suspend_on(): see ShutdownTest for
-        // suspend_on()).
-        $future = async(Native::trySleep(...), 200);
-        delay(0);
-        $pid = pcntl_fork();
-        if ($pid === 0) {
-            exit(self::useAfterFork());
-        }
-        // Blocks the PHP thread: the future completes meanwhile, and its notification must still
-        // be there once the child exits, although the child called wakeup() all along.
-        pcntl_waitpid($pid, $status);
-        self::assertTrue(pcntl_wifexited($status), 'the child exited');
-        self::assertSame(0, pcntl_wexitstatus($status), 'the child failed check '.pcntl_wexitstatus($status));
-        self::assertSame(200, $future->await(new TimeoutCancellation(2)));
-    }
-
-    /**
-     * In a forked child, returns 0, or the number of the first check that failed. Tokio's threads
-     * aren't inherited: everything fails or does nothing.
-     */
-    private static function useAfterFork(): int
-    {
-        $rejected = static function (\Closure $call): bool {
-            try {
-                $call();
-                return false;
-            } catch (\Throwable $e) {
-                return str_contains($e->getMessage(), 'fork');
-            }
-        };
-        $start = hrtime(true);
-        $checks = [
-            static fn () => $rejected(Native::init(...)),
-            static fn () => $rejected(Native::initWith(...)),
-            static fn () => $rejected(static fn () => Native::trySleep(1)),
-            static fn () => $rejected(static fn () => Native::sleep(1)),
-            // The parent's caller is pending there, not here.
-            static fn () => Native::pending() === 0,
-            static function () use (&$start): bool {
-                $start = hrtime(true);
-                Native::drain(1_000);
-                return (hrtime(true) - $start) / 1e9 < 0.5;
-            },
-            // The notification of the parent's future (due within 200 ms) stays in the shared socket.
-            static function (): bool {
-                $start = hrtime(true);
-                while ((hrtime(true) - $start) / 1e9 < 0.4) {
-                    Native::wakeup();
-                    usleep(1_000);
-                }
-                return true;
-            },
-        ];
-        foreach ($checks as $i => $check) {
-            if (!$check()) {
-                return $i + 1;
-            }
-        }
-        return 0;
-    }
 }
